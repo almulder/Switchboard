@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.3.0 - 2026-10-26 - Stop alarms: disarming Safety Monitor (or the Stop All switch / button) stops sirens and sounds; draft cleanup removes empty device pickers.
  *  0.2.1 - 2026-10-26 - Every page accepts link parameters (Hubitat passed an edit link's [id] to the list page and it crashed).
  *  0.2.0 - 2026-10-26 - Setup lists open each item on its own page with Save / Delete; new items are drafts until saved.
  *  0.1.8 - 2026-10-26 - Message log keeps the last 100 messages (was 200).
@@ -36,7 +37,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.2.1"
+@Field static final String APP_VERSION = "0.3.0"
+@Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -252,6 +254,8 @@ def mainPage(params = null) {
                 }
             }
             paragraph queueStatus()
+            input "btnStopAll", "button", title: "Stop all now", width: 4
+            paragraph note("Turns off every Switchboard siren, stops the speakers and drops waiting sounds and urgent messages.")
         }
         section(uiTitle(null, "Latest messages")) {
             List l = logEntries()
@@ -269,7 +273,7 @@ def mainPage(params = null) {
             href "testPage", title: "Test Mode", description: isTestMode() ? "ON" : "Off"
             href "guestPage", title: "Guest Modes", description: guestIds() ? "${guestIds().size()} Guest Mode(s), ${guestsOn().size()} on" : "None yet"
             href "logPage", title: "Message log", description: "What was played, skipped or sent, and by which rule"
-            href "settingsPage", title: "Settings", description: "Night time, who is home, rule lookup, logging"
+            href "settingsPage", title: "Settings", description: "Night time, who is home, stopping alarms, rule lookup, logging"
         }
     }
 }
@@ -304,9 +308,19 @@ private boolean isDraft(String kind, String id) {
 /** keys of an item map without drafts */
 private List liveKeys(Map m) { m.findAll { k, v -> !(v instanceof Map && v.draft == true) }.keySet() as List }
 private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? one : (many ?: one + 's')}".toString() }
+/** every input an item's edit page can create, per kind (an empty device picker is not in settings.keySet(), so name them all) */
+@Field static final Map<String, List<String>> ITEM_INPUTS = [
+    prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
+    ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
+    sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
+    snd : ["name", "url", "secs"],
+    gm  : ["name", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs"]
+]
 private void removeItemSettings(String kind, String id) {
     String pre = "${kind}_${id}_".toString()
-    (settings.keySet().findAll { it.startsWith(pre) } as List).each { app.removeSetting(it as String) }
+    Set<String> keys = (settings.keySet().findAll { it.startsWith(pre) }.collect { it as String }) as Set
+    ((ITEM_INPUTS[kind] ?: []) as List).each { keys << "${pre}${it}".toString() }
+    keys.each { String k -> try { app.removeSetting(k) } catch (e) { logDebug "removeSetting ${k}: ${e}" } }
 }
 
 /** a new item: next real id, kept as a draft (no device, invisible to the runtime) until Save */
@@ -955,6 +969,15 @@ def settingsPage(params = null) {
             input "homeSensors", "capability.presenceSensor", title: "Presence sensors" + tip("Used by notifications set to 'Only when nobody is home'. Nobody is home when none of these are present."),
                   multiple: true, required: false
         }
+        section(uiTitle(null, "Stopping alarms")) {
+            input "stopOnDisarm", "bool", title: "When Safety Monitor is disarmed or cancels its alert, stop all sirens and sounds" +
+                  tip("Turns off every Switchboard siren, stops speakers playing an urgent message or a sound, and drops waiting sounds and urgent messages. Normal spoken messages (e.g. 'System disarmed') still play."),
+                  defaultValue: true
+            input "stopSwitchOn", "bool", title: "Create a '${STOP_LABEL}' switch for dashboards, buttons and voice" +
+                  tip("Turning the switch on stops everything like the 'Stop all now' button; it turns itself back off after 2 seconds."),
+                  defaultValue: true
+            paragraph note("The switch is created or removed when you press Done on the main page.")
+        }
         section(uiTitle(null, "Sounds from rules")) {
             input "defaultTrackSecs", "number", title: "Length of a playTrack sound that isn't in Sound files (seconds)" + tip("The queue waits this long before the next message."),
                   range: "1..3600", defaultValue: 10, width: 6
@@ -984,6 +1007,7 @@ void appButtonHandler(String btn) {
         case "btnLogReset": ["logDev", "logOutcome", "logFrom", "logWhen", "logFromDate", "logFromTime", "logToDate", "logToTime"].each { app.removeSetting(it) }; return
         case "btnTmOn":     turnTestModeOn(); return
         case "btnTmOff":    turnTestModeOff("Test Mode is OFF. Announcements, notifications and sirens are back to normal."); return
+        case "btnStopAll":  stopAll("Stop all button"); return
     }
     if (btn.startsWith("btnGmOn_"))    { guestOn(btn - "btnGmOn_", false); return }
     if (btn.startsWith("btnGmUntil_")) { guestOn(btn - "btnGmUntil_", true); return }
@@ -1087,8 +1111,7 @@ private void deleteItem(String kind, String id) {
     }
     m.remove(id)
     state[KINDS[kind].stateKey as String] = m
-    List keys = settings.keySet().findAll { it.startsWith("${kind}_${id}_") } as List
-    keys.each { app.removeSetting(it as String) }
+    removeItemSettings(kind, id)
 }
 
 /** names from settings → state, relabel devices, re-create missing ones */
@@ -1400,6 +1423,107 @@ void sirenTimeoutCheck() {
         if ((so[rid] as Long) <= t) sirensOff(rid as String, "Stopped after ${intSet("sir_${rid}_maxMin", 5)} min")
     }
     scheduleSirenCheck()
+}
+
+// ===================================================================== STOPPING ALARMS
+
+/**
+ * Stops everything Switchboard is sounding: sirens off, real speakers stopped (volume restored by the queue),
+ * waiting urgent messages and waiting sounds / tracks dropped. Waiting normal text announcements are kept.
+ * Callers are all Switchboard's own runs (button, HSM event, Stop All switch event), so the real devices credit Switchboard.
+ */
+void stopAll(String why) {
+    String w = why ?: "Stop"
+    // ---- sirens (maxMin 0 sirens have no timer, so the child's own state counts too)
+    Map so = (atomicState.sirenOffAt ?: [:]) as Map
+    int sirens = 0
+    ids("sir").each { String rid ->
+        def child = getChildDevice(itemDni("sir", rid))
+        String al = child ? (child.currentValue("alarm") ?: "off") as String : "off"
+        boolean sounding = so.containsKey(rid) || al != "off" || child?.currentValue("switch") == "on"
+        if (!sounding) return
+        sirenCommand(rid, "off")
+        sirenOffAtSet(rid, null)
+        childEvent(child, "alarm", "off"); childEvent(child, "switch", "off"); childEvent(child, "lastMessage", "Stopped – ${w}".toString())
+        sirens++
+    }
+    scheduleSirenCheck()
+
+    // ---- queue: drop waiting urgent items and waiting sounds / tracks; keep normal text announcements
+    int dropped = 0
+    Set<String> dnis = [] as Set
+    new ArrayList<Map>(qUrgent()).each { Map item ->
+        if (qUrgent().remove(item)) { stopDrop(item, w); dropped++; if (item.dni) dnis << (item.dni as String) }
+    }
+    new ArrayList<Map>(qNormal()).each { Map item ->
+        if ((item.sound || item.uri) && qNormal().remove(item)) { stopDrop(item, w); dropped++; if (item.dni) dnis << (item.dni as String) }
+    }
+
+    // ---- speakers playing an urgent item or a sound / track item: free them, then stop() the real ones
+    //      (a speaker playing a normal text announcement is left alone)
+    ConcurrentHashMap<String, Map> busy = mapFor(BUSY)
+    long t = now()
+    Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
+    List<String> spk = []
+    new ArrayList<String>(busy.keySet()).each { String k ->
+        Map b = busy[k]
+        if (!b || !b.alarm || (b.until as Long) <= t || !busy.remove(k, b)) return
+        if (b.dni) dnis << (b.dni as String)
+        if (byId[k]) spk << k
+    }
+
+    dnis.each { refreshStatus(it) }
+    String summary = "Stop all (${w}): ${sirens} siren(s) off, ${spk.size()} speaker(s) stopped, ${dropped} waiting message(s) removed"
+    if (sirens || spk || dropped) {
+        addLog([id: newLogId(), t: now(), dev: APP_TITLE, dni: "", kind: "stop", text: w, outcome: "stopped", source: ""])
+        logInfo summary
+    } else logDebug summary + " – nothing was sounding"
+    // a pending queue run must not start a kept announcement before the stop() below reaches the speakers
+    unschedule("processQueue")
+    stopSpeakers([ids: spk])          // stop() on each, then processQueue (restores volumes, plays kept announcements)
+}
+private void stopDrop(Map item, String why) {
+    if (item.ukey) UKEYS.remove(item.ukey as String)
+    logSet(item.logId as String, [outcome: "stopped – ${why}".toString()])
+}
+
+void hsmStopStatusHandler(evt) {
+    if (settings.stopOnDisarm == false) return
+    if ((evt?.value as String) in ["disarmed", "allDisarmed"]) stopAll("Safety Monitor disarmed")
+}
+void hsmStopAlertHandler(evt) {
+    if (settings.stopOnDisarm == false) return
+    if ((evt?.value as String) == "cancel") stopAll("Safety Monitor alert cancelled")
+}
+
+private String stopDni() { "SB-${app.id}-stopall".toString() }
+/** creates (and subscribes) or deletes the Stop All switch to match the setting (initialize) */
+private void syncStopSwitch() {
+    String dni = stopDni()
+    def d = getChildDevice(dni)
+    if (settings.stopSwitchOn != false) {
+        if (!d) {
+            try { d = addChildDevice("hubitat", "Virtual Switch", dni, [name: STOP_LABEL, label: STOP_LABEL, isComponent: false]) }
+            catch (e) { log.error "${APP_TITLE}: couldn't create the '${STOP_LABEL}' switch: ${e}"; state.pageErr = "Couldn't create the switch \"${STOP_LABEL}\". (${e.message})" }
+        }
+        if (d) {
+            subscribe(d, "switch.on", "stopSwitchHandler")
+            if (d.currentValue("switch") == "on") runIn(2, "stopSwitchReset")
+        }
+    } else if (d) {
+        try { deleteChildDevice(dni) } catch (e) {
+            log.warn "${APP_TITLE}: couldn't delete the '${STOP_LABEL}' switch: ${e}"
+            state.pageErr = "Couldn't delete the \"${STOP_LABEL}\" switch. If a rule or dashboard uses it, remove it there first. (${e.message})"
+        }
+    }
+}
+void stopSwitchHandler(evt) {
+    stopAll("Stop All switch")
+    runIn(2, "stopSwitchReset")
+}
+void stopSwitchReset() {
+    def d = getChildDevice(stopDni())
+    if (d && d.currentValue("switch") == "on") { try { d.off() } catch (e) { log.warn "${APP_TITLE}: couldn't turn off '${STOP_LABEL}': ${e}" } }
 }
 
 // ===================================================================== DELIVERY HELPERS
@@ -1749,8 +1873,7 @@ private void deleteGuest(String gid) {
     Map off = (state.gmOffAt ?: [:]) as Map; off.remove(gid); state.gmOffAt = off
     Map was = (state.gmWasOn ?: [:]) as Map; was.remove(gid); state.gmWasOn = was
     Map rn = (state.gmRemindNext ?: [:]) as Map; rn.remove(gid); state.gmRemindNext = rn
-    List keys = settings.keySet().findAll { it.startsWith("gm_${gid}_") } as List
-    keys.each { app.removeSetting(it as String) }
+    removeItemSettings("gm", gid)
     // take it out of every profile / notifier / siren
     settings.keySet().findAll { it.endsWith("_guestQuiet") || it.endsWith("_guestPlay") }.toList().each { String k ->
         List v = ((settings[k] ?: []) as List).findAll { it != gid }
@@ -2058,7 +2181,7 @@ private void queuePass() {
             if (item.ukey) UKEYS.remove(item.ukey as String)
             itemFinished(item)
         }
-        markBusy(busy, res, devs, end, true, item.dni as String)
+        markBusy(busy, res, devs, end, true, item.dni as String, true)
         if (item.dni) touched << (item.dni as String)
         blocked.addAll(res)
         t = now()
@@ -2085,7 +2208,7 @@ private void queuePass() {
         if (wait) { blocked.addAll(res); return }
         long end = playItem(item, devs, false)
         if (itemDone(item)) { qNormal().remove(item); itemFinished(item) }
-        markBusy(busy, res, devs, end, false, item.dni as String)
+        markBusy(busy, res, devs, end, false, item.dni as String, (item.sound || item.uri) as boolean)
         if (item.dni) touched << (item.dni as String)
         blocked.addAll(res)
         t = now()
@@ -2109,8 +2232,8 @@ private void queuePass() {
 }
 
 /** Mark resources busy until 'end'. In global mode speakers are also marked, so volume restore and stop() know which ones are in use. */
-private void markBusy(ConcurrentHashMap<String, Map> busy, List<String> res, List devs, long end, boolean urgent, String dni) {
-    Map v = [until: end, urgent: urgent, dni: dni]
+private void markBusy(ConcurrentHashMap<String, Map> busy, List<String> res, List devs, long end, boolean urgent, String dni, boolean alarm) {
+    Map v = [until: end, urgent: urgent, dni: dni, alarm: alarm]       // alarm: urgent or a sound / track item (Stop all stops these)
     res.each { busy[it] = v }
     if (res == ["ALL"]) devs.each { busy[it.id.toString()] = v }
 }
@@ -2371,6 +2494,13 @@ void initialize() {
     ensureChildren()
 
     subscribe(location, "systemStart", "hubRestarted")
+
+    // ---- stopping alarms: Safety Monitor disarm / cancel, and the Stop All switch
+    if (settings.stopOnDisarm != false) {
+        subscribe(location, "hsmStatus", "hsmStopStatusHandler")
+        subscribe(location, "hsmAlert", "hsmStopAlertHandler")
+    }
+    syncStopSwitch()
 
     // ---- Test Mode: re-arm its timers (it has no switch; only the app turns it on)
     if (isTestMode()) {

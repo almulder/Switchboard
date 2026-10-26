@@ -24,6 +24,12 @@ DNIs: `SB-<appId>-spk-<id>`, `SB-<appId>-ntf-<id>`, `SB-<appId>-snd-<id>` (siren
 Labels: "Announce – <profile name>", "Notify – <name>", "Siren – <name>"; renaming in the app relabels the device.
 Deleting an item in the app deletes its device (with a confirm link). `uninstalled()` deletes all children.
 
+**Stop All switch:** when `stopSwitchOn` is on (default), Switchboard also creates a normal (non-component) child
+`addChildDevice("hubitat", "Virtual Switch", "SB-<appId>-stopall", [label: "Switchboard – Stop All"])` for
+dashboards, buttons and voice. Turning it on runs Stop all (§4) and Switchboard turns it back off after ~2 s.
+Turning the setting off deletes it (if the hub refuses, the error is shown and the switch is kept). Guest Mode
+switches use their own DNIs (`SB-<appId>-gm-<id>`).
+
 ### Contract: driver → app (the only calls drivers make)
 
 ```
@@ -170,6 +176,17 @@ by device and outcome; "Clear log" button.
 rule sent each message" (default on); optional `hubUser`/`hubPass` for Hub Security (tip: only needed if Hub Login
 Security is on); logging (debug auto-off 30 min, description).
 
+**Stopping alarms** section: `stopOnDisarm` bool (default on) "When Safety Monitor is disarmed or cancels its alert,
+stop all sirens and sounds"; `stopSwitchOn` bool (default on) "Create a 'Switchboard – Stop All' switch for
+dashboards, buttons and voice" (created / deleted on Done). The main page's "Right now" section always shows a
+**Stop all now** button.
+
+**Draft / delete cleanup:** removing an item's settings removes every `<kind>_<id>_` key in `settings` *and* every
+known input name of that kind (an empty device picker is not in `settings.keySet()`): prof name, priority, spk,
+volMode, dayVol, nightVol, fixedVol, chime, dedupeSec, staleSec; ntf name, devs, when, dedupeSec, prefix, pushover;
+sir name, devs, maxMin; (all three) guestPlay, guestQuiet, guestOther; snd name, url, secs; gm name, source, switch,
+modes, endDate, endTime, defaultHours, remindTime, remindDevs.
+
 ## 4. Behaviour
 
 **Speech queue:** reuse Rule Forge's engine (ConcurrentLinkedQueue per app, semaphore, measured TTS duration, urgent
@@ -209,6 +226,21 @@ speaking/pushing. Failures → "unknown"; never delays delivery. Undocumented en
 **Hub restart:** `systemStart` → Test Mode off (push to testers), re-initialize, clear stale busy state. The queue
 lives in memory, so messages still waiting at a reboot or code save are lost; their log entries say
 "failed – hub restarted". (Replaying minutes-old alerts after a reboot would be worse.)
+
+**Stopping alarms (`stopAll(why)`):** run by the **Stop all now** button ("Stop all button"), the Stop All switch
+("Stop All switch"), and — only while `stopOnDisarm` is on — `location hsmStatus` "disarmed"/"allDisarmed"
+("Safety Monitor disarmed") and `location hsmAlert` "cancel" ("Safety Monitor alert cancelled"). It:
+- turns off every Switchboard siren that is sounding (in `sirenOffAt`, or its virtual siren's alarm ≠ off / switch on):
+  `off()` to its real sirens, clears its stop timer, sets the virtual siren's alarm / switch to off;
+- frees every speaker whose current Switchboard item is urgent or a sound / track item (any of its parts; `BUSY`
+  entries carry `alarm`) and sends `stop()` to those real ones (from Switchboard's own run), then runs the queue,
+  which restores volumes as usual; a speaker playing a normal text announcement (even its chime) is left alone;
+- drops every waiting urgent item and every waiting sound / track item (`playSound`, `playTrack`; a profile chime
+  before text doesn't count), log outcome "stopped – <why>"; waiting normal text announcements are kept (so
+  "System disarmed" is still spoken);
+- logs one entry (kind "stop", device "Switchboard", text = why, outcome "stopped") and an info line — only when
+  something was actually stopped (a siren, a speaker or a dropped waiting item); otherwise debug log only (so a
+  cancel followed by a disarm makes one entry, and an everyday disarm makes none).
 
 **Turning Test Mode on:** messages still waiting in the queue are pushed to the testers, never dropped. Sirens that
 are already sounding keep sounding until their "Stop after" time (a possibly real alarm is not silenced).
