@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.6 - 2026-10-26 - Message log filters by From (a rules system or one rule) and by When (quick ranges or between dates).
  *  0.1.5 - 2026-10-26 - The "From" legend also shows above Latest messages on the main page.
  *  0.1.4 - 2026-10-26 - Real speakers are only driven from Switchboard's own run, so their Events page always shows Switchboard.
  *  0.1.3 - 2026-10-26 - Message log shows which rules system sent each message (WC, RM, BR, HSM…), with a legend.
@@ -31,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.5"
+@Field static final String APP_VERSION = "0.1.6"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -578,12 +579,65 @@ def logPage() {
                   required: false, submitOnChange: true, width: 4
             input "logOutcome", "enum", title: "Outcome", options: all.collect { it.outcome as String }.findAll { it }.unique().sort(),
                   required: false, submitOnChange: true, width: 4
-            List l = all.findAll { (!logDev || it.dev == logDev) && (!logOutcome || it.outcome == logOutcome) }
+            input "logFrom", "enum", title: "From" + tip("Pick a whole rules system (e.g. every webCoRE piston) or one rule."),
+                  options: fromOptions(all), required: false, submitOnChange: true, width: 4
+            input "logWhen", "enum", title: "When", options: LOG_WHEN, defaultValue: "all", required: false, submitOnChange: true, width: 4
+            if (logWhen == "custom") {
+                input "logFromDate", "date", title: "From date", required: false, submitOnChange: true, width: 2
+                input "logFromTime", "time", title: "time (blank = start of day)", required: false, submitOnChange: true, width: 2
+                input "logToDate", "date", title: "To date", required: false, submitOnChange: true, width: 2
+                input "logToTime", "time", title: "time (blank = end of day)", required: false, submitOnChange: true, width: 2
+            }
+            List span = logSpan()
+            List l = all.findAll { e ->
+                (!logDev || e.dev == logDev) && (!logOutcome || e.outcome == logOutcome) && fromMatches(e.source as String) &&
+                (span[0] == null || ((e.t ?: 0) as Long) >= (span[0] as Long)) && (span[1] == null || ((e.t ?: 0) as Long) <= (span[1] as Long))
+            }
             paragraph fromLegend()
+            paragraph note("Showing ${l.size()} of ${all.size()}.")
             paragraph l ? logTable(l) : note("Nothing to show.")
-            input "btnClearLog", "button", title: "Clear log"
+            if (logDev || logOutcome || logFrom || (logWhen && logWhen != "all")) input "btnLogReset", "button", title: "Clear filters", width: 3
+            input "btnClearLog", "button", title: "Clear log", width: 3
         }
     }
+}
+
+@Field static final Map LOG_WHEN = [all: "Any time", h1: "Last hour", today: "Today", h24: "Last 24 hours", d7: "Last 7 days", custom: "Between dates…"]
+
+/** "From" filter choices: each rules system present ("sys:WC") then each single source */
+private Map fromOptions(List all) {
+    List srcs = all.collect { it.source as String }.findAll { it }.unique().sort()
+    Map o = [:]
+    RULE_SYSTEMS.each { r -> if (srcs.any { it.startsWith("${r[1]} – ") }) o["sys:${r[1]}".toString()] = "All ${r[2]} (${r[1]})".toString() }
+    srcs.each { o[it] = it }
+    return o
+}
+private boolean fromMatches(String src) {
+    if (!logFrom) return true
+    String f = logFrom as String
+    return f.startsWith("sys:") ? (src ?: "").startsWith(f.substring(4) + " – ") : src == f
+}
+/** [start, end] in epoch ms for the "When" filter (nulls = open) */
+private List logSpan() {
+    long t = now()
+    switch (logWhen ?: "all") {
+        case "h1":  return [t - 3600000L, null]
+        case "h24": return [t - 86400000L, null]
+        case "d7":  return [t - 7 * 86400000L, null]
+        case "today": return [timeToday("00:00", location.timeZone).time, null]
+        case "custom": return [logPoint(logFromDate as String, logFromTime as String, false), logPoint(logToDate as String, logToTime as String, true)]
+    }
+    return [null, null]
+}
+private Long logPoint(String d, String tm, boolean end) {
+    if (!d) return null
+    try {
+        String hm = tm ? toDateTime(tm).format("HH:mm", location.timeZone) : (end ? "23:59" : "00:00")
+        def f = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm")
+        f.setTimeZone(location.timeZone)
+        long ms = f.parse(d.take(10) + " " + hm).time
+        return end ? ms + 59999L : ms
+    } catch (e) { return null }
 }
 
 /** legend for the codes in the log's "From" column */
@@ -648,6 +702,7 @@ void appButtonHandler(String btn) {
         case "btnDelNo":    state.remove("confirmDel"); return
         case "btnClearQ":   clearQueue(); return
         case "btnClearLog": withStateLock { atomicState.log = [] }; return
+        case "btnLogReset": ["logDev", "logOutcome", "logFrom", "logWhen", "logFromDate", "logFromTime", "logToDate", "logToTime"].each { app.removeSetting(it) }; return
         case "btnTmOn":     turnTestModeOn(); return
         case "btnTmOff":    turnTestModeOff("Test Mode is OFF. Announcements, notifications and sirens are back to normal."); return
         case "btnAddGuest": addGuest(); return
