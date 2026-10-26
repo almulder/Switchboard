@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.4 - 2026-10-26 - Real speakers are only driven from Switchboard's own run, so their Events page always shows Switchboard.
  *  0.1.3 - 2026-10-26 - Message log shows which rules system sent each message (WC, RM, BR, HSM…), with a legend.
  *  0.1.2 - 2026-10-26 - Switchboard's own devices are never used as real speakers, phones or sirens (would loop).
  *  0.1.1 - 2026-10-26 - Name, URL, tester and end-time fields save as you leave them (buttons couldn't see unsaved text).
@@ -29,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.3"
+@Field static final String APP_VERSION = "0.1.4"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -903,7 +904,7 @@ void sbSpeak(String dni, Map req) {
     if (res != "queued") logSet(logId, [outcome: res])
     scheduleLookup(child, dni, cmd, raw, logId, src)
     refreshStatus(dni)
-    if (res == "queued") processQueue()
+    if (res == "queued") kickQueue()
 }
 
 /** Speaker stop(): drop this device's waiting items; stop the real speakers if this device's item is playing. */
@@ -925,12 +926,25 @@ void sbStop(String dni) {
         Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
         keys.each { String key ->
             busy.remove(key)
-            def dev = byId[key]
-            if (dev) { try { if (dev.hasCommand("stop")) dev.stop() } catch (e) { log.warn "${APP_TITLE}: stop failed on ${dev.displayName}: ${e}" } }
         }
+        runInMillis(1, "stopSpeakers", [overwrite: false, data: [ids: keys.findAll { byId[it] }]])
     }
     logInfo "Stop from ${getChildDevice(dni)?.displayName ?: dni}: ${n} waiting removed" + (keys ? ", playing message stopped" : "")
     refreshStatus(dni)
+    kickQueue()
+}
+
+/**
+ * Rules call Switchboard's devices, so commands made inside that call are credited to the rule on the real speaker's
+ * Events page. Real speakers are only ever driven from Switchboard's own scheduled run, so they always show Switchboard.
+ */
+private void kickQueue() { runInMillis(1, "processQueue") }
+void stopSpeakers(Map data) {
+    Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
+    ((data?.ids ?: []) as List).each { String id ->
+        def dev = byId[id]
+        if (dev) { try { if (dev.hasCommand("stop")) dev.stop() } catch (e) { log.warn "${APP_TITLE}: stop failed on ${dev.displayName}: ${e}" } }
+    }
     processQueue()
 }
 
