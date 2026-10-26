@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.4.3 - 2026-10-26 - Picking a hub sound file sets its estimated length; deleting a new item shows "Deleted" instead of opening another blank one.
  *  0.4.2 - 2026-10-26 - Sound files: pick one of the hub's File Manager audio files from a list (length estimated), or enter a web address with a short how-to and checks.
  *  0.4.1 - 2026-10-26 - Next on an edit page saves like Save; new items no longer get lost or duplicated when Hubitat redraws pages.
  *  0.4.0 - 2026-10-26 - Sirens: after any off, Switchboard checks they really turned off and retries; pushes a warning if one is still on after 10 s. A retry never follows a re-trigger, and a siren turned on by something else is left alone.
@@ -40,7 +41,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.4.2"
+@Field static final String APP_VERSION = "0.4.3"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -373,7 +374,9 @@ private String editTarget(String kind, params) {
         Map sv = state["savedNew_${kind}".toString()] as Map
         Map dr = rawMap(kind).find { k, v -> v instanceof Map && v.draft == true }?.with { [id: it.key, v: it.value] }
         String cur
-        if (sv && now() - ((sv.at ?: 0) as Long) < 20000L && rawMap(kind).containsKey(sv.id)) cur = sv.id as String
+        Long del = state["deleted_${kind}".toString()] as Long
+        if (del && now() - del < 20000L) cur = null                                       // just deleted: show "Deleted"
+        else if (sv && now() - ((sv.at ?: 0) as Long) < 20000L && rawMap(kind).containsKey(sv.id)) cur = sv.id as String
         else if (dr && now() - (((dr.v as Map).touched ?: 0) as Long) < 120000L) cur = dr.id as String
         else {
             if (dr) discardDraft(kind, dr.id as String)
@@ -720,7 +723,7 @@ def soundEditPage(params = null) {
                     String want = hubFileUrl(f)
                     if (settings[pre + "url"] != want) {
                         app.updateSetting(pre + "url", [type: "text", value: want])
-                        if (!settings[pre + "secs"]) app.updateSetting(pre + "secs", [type: "number", value: files[f].secs])
+                        app.updateSetting(pre + "secs", [type: "number", value: files[f].secs])      // a new file: estimate its length
                         if (!cleanName(settings[pre + "name"] as String)) app.updateSetting(pre + "name", [type: "text", value: f.replaceAll(/\.[^.]+$/, "")])
                     }
                     url = want
@@ -1117,6 +1120,7 @@ void appButtonHandler(String btn) {
                 else deleteItem(kind, id)
                 if (!rawMap(kind).containsKey(id)) state.editMsg = "Deleted."
             }
+            if (!rawMap(kind).containsKey(id)) state["deleted_${kind}".toString()] = now()    // a redraw now shows "Deleted", not a new draft
         }
         return
     }
