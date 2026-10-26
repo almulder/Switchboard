@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.5 - 2026-10-26 - The "From" legend also shows above Latest messages on the main page.
  *  0.1.4 - 2026-10-26 - Real speakers are only driven from Switchboard's own run, so their Events page always shows Switchboard.
  *  0.1.3 - 2026-10-26 - Message log shows which rules system sent each message (WC, RM, BR, HSM…), with a legend.
  *  0.1.2 - 2026-10-26 - Switchboard's own devices are never used as real speakers, phones or sirens (would loop).
@@ -30,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.4"
+@Field static final String APP_VERSION = "0.1.5"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -242,6 +243,7 @@ def mainPage() {
         }
         section(uiTitle(null, "Latest messages")) {
             List l = logEntries()
+            if (l) paragraph fromLegend()
             paragraph l ? logTable(l.take(10)) : note("Nothing yet.")
             href "logPage", title: "Message log", description: "All ${l.size()} entries, with filters"
         }
@@ -577,12 +579,17 @@ def logPage() {
             input "logOutcome", "enum", title: "Outcome", options: all.collect { it.outcome as String }.findAll { it }.unique().sort(),
                   required: false, submitOnChange: true, width: 4
             List l = all.findAll { (!logDev || it.dev == logDev) && (!logOutcome || it.outcome == logOutcome) }
-            paragraph note("<b>From:</b> " + RULE_SYSTEMS.findAll { it[1] != "SB" }.collect { "${it[1]} = ${it[2]}" }.join(" · ") +
-                           ". Any other app shows its own type, e.g. <i>Rule Forge – Office Door</i>.")
+            paragraph fromLegend()
             paragraph l ? logTable(l) : note("Nothing to show.")
             input "btnClearLog", "button", title: "Clear log"
         }
     }
+}
+
+/** legend for the codes in the log's "From" column */
+private String fromLegend() {
+    note("<b>From:</b> " + RULE_SYSTEMS.findAll { it[1] != "SB" }.collect { "${it[1]} = ${it[2]}" }.join(" · ") +
+         ". Any other app shows its own type, e.g. <i>Rule Forge – Office Door</i>.")
 }
 
 private String logTable(List rows) {
