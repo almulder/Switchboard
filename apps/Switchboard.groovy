@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.4.2 - 2026-10-26 - Sound files: pick one of the hub's File Manager audio files from a list (length estimated), or enter a web address with a short how-to and checks.
  *  0.4.1 - 2026-10-26 - Next on an edit page saves like Save; new items no longer get lost or duplicated when Hubitat redraws pages.
  *  0.4.0 - 2026-10-26 - Sirens: after any off, Switchboard checks they really turned off and retries; pushes a warning if one is still on after 10 s. A retry never follows a re-trigger, and a siren turned on by something else is left alone.
  *  0.3.0 - 2026-10-26 - Stop alarms: disarming Safety Monitor (or the Stop All switch / button) stops sirens and sounds; draft cleanup removes empty device pickers.
@@ -39,7 +40,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.4.1"
+@Field static final String APP_VERSION = "0.4.2"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -316,7 +317,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
     ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
-    snd : ["name", "url", "secs"],
+    snd : ["name", "src", "file", "url", "secs"],
     gm  : ["name", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs"]
 ]
 private void removeItemSettings(String kind, String id) {
@@ -704,12 +705,41 @@ def soundEditPage(params = null) {
         boolean draft = isDraft("snd", sid)
         String pre = "snd_${sid}_"
         String url = draft ? (settings[pre + "url"] ?: "").toString().trim() : (soundUrl(sid) ?: "")
+        Map files = hubAudioFiles()
+        String oldUrl = (settings[pre + "url"] ?: "").toString()
+        String srcDflt = (oldUrl && !oldUrl.contains("/local/")) || !files ? "url" : "hub"
         section(uiTitle(null, "Sound")) {
-            input pre + "name", "text", title: "Name", submitOnChange: true, width: 4
-            input pre + "url", "text", title: "URL" + tip(SND_URL_TIP), submitOnChange: true, width: 6
-            input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays. The next message waits this long."),
-                  range: "1..3600", defaultValue: 5, submitOnChange: true, width: 2
-            if (!url) paragraph warn(draft ? "Enter a URL." : "Enter a URL, or this sound is skipped.")
+            input pre + "src", "enum", title: "Where is the sound?", submitOnChange: true, width: 6,
+                  options: [hub: "A sound file on this hub", url: "A web address (URL)"], defaultValue: srcDflt
+            if ((settings[pre + "src"] ?: srcDflt) == "hub") {
+                input pre + "file", "enum", title: "Sound file" + tip("Files in Hubitat → Settings → File Manager. Upload an .mp3 there to see it here."),
+                      options: files.collectEntries { k, v -> [(k): "${k}  (${v.kb} KB)".toString()] }, submitOnChange: true, width: 6
+                if (!files) paragraph warn("No sound files found on the hub. Upload an .mp3 in Settings → File Manager, or use a web address.")
+                String f = settings[pre + "file"] as String
+                if (f && files[f]) {
+                    String want = hubFileUrl(f)
+                    if (settings[pre + "url"] != want) {
+                        app.updateSetting(pre + "url", [type: "text", value: want])
+                        if (!settings[pre + "secs"]) app.updateSetting(pre + "secs", [type: "number", value: files[f].secs])
+                        if (!cleanName(settings[pre + "name"] as String)) app.updateSetting(pre + "name", [type: "text", value: f.replaceAll(/\.[^.]+$/, "")])
+                    }
+                    url = want
+                }
+            } else {
+                input pre + "url", "text", title: "Web address (URL)", submitOnChange: true, width: 12
+                paragraph uiHint("Paste a <b>direct link to the audio file</b>. It must end in <b>.mp3</b> (or .wav / .m4a), not a web page.<br>" +
+                                 "✓ <code>http://192.168.1.20/sounds/doorbell.mp3</code> — a file on your network<br>" +
+                                 "✓ <code>https://example.com/chime.mp3</code> — a file on the internet<br>" +
+                                 "✗ YouTube, Spotify or any web page link<br>" +
+                                 "<b>http</b> works with every speaker; some speakers can't play <b>https</b> links. Short files (under 30 s) work best.")
+                String u = (settings[pre + "url"] ?: "").toString().trim()
+                if (u && !(u ==~ /(?i)^https?:\/\/.+/)) paragraph warn("It must start with http:// or https://")
+                else if (u && !(u.replaceAll(/[?#].*$/, "") ==~ /(?i).*\.(mp3|wav|m4a|aac|ogg|flac)$/)) paragraph warn("That doesn't look like an audio file link (it should end in .mp3, .wav or .m4a). It may be a web page.")
+            }
+            input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
+            input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays; the next message waits this long. For hub files this is estimated from the file size — adjust if it cuts off or waits too long."),
+                  range: "1..3600", defaultValue: 5, submitOnChange: true, width: 3
+            if (!url) paragraph warn(draft ? "Pick a file or enter a web address." : "Pick a file or enter a web address, or this sound is skipped.")
         }
         section(uiTitle(null, "Test")) {
             if (draft) {
@@ -724,6 +754,32 @@ def soundEditPage(params = null) {
         }
         editFoot("snd", sid)
     }
+}
+
+/** audio files in the hub's File Manager: name → [kb, secs (estimated at 128 kbit/s)]. Empty if the list can't be read. */
+private Map hubAudioFiles() {
+    Map out = [:]
+    try {
+        Map p = [uri: "http://127.0.0.1:8080/hub/fileManager/json", timeout: 5]
+        if (state.hubCookie) p.headers = [Cookie: state.hubCookie as String]
+        httpGet(p) { resp ->
+            def files = resp.data?.files
+            (files ?: []).findAll { it.type == "file" && (it.name as String) ==~ /(?i).*\.(mp3|wav|m4a|aac|ogg|flac)$/ }
+                          .sort { (it.name as String).toLowerCase() }
+                          .each { f ->
+                long b = ((f.size ?: 0) as String).toLong()
+                out[f.name as String] = [kb: (int) Math.max(1L, (long) (b / 1024)), secs: (int) Math.max(1L, Math.min(3600L, (long) Math.ceil(b / 16000.0d)))]
+            }
+        }
+    } catch (e) { logDebug "File Manager list: ${e}" }
+    return out
+}
+/** URL a speaker can fetch a hub file from */
+private String hubFileUrl(String name) {
+    String ip = null
+    try { ip = location.hub?.localIP } catch (ignored) { }
+    if (!ip) try { ip = location.hubs[0]?.getDataValue("localIP") } catch (ignored) { }
+    return "http://${ip ?: '127.0.0.1'}/local/${URLEncoder.encode(name, 'UTF-8').replace('+', '%20')}".toString()
 }
 
 // ------------------------------------------------------------------ Speakers & queue
