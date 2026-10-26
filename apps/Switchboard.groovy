@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.5.0 - 2026-10-26 - One sound dropdown (hub files + web address); real track length from the speaker; hub login removed (not needed).
  *  0.4.3 - 2026-10-26 - Picking a hub sound file sets its estimated length; deleting a new item shows "Deleted" instead of opening another blank one.
  *  0.4.2 - 2026-10-26 - Sound files: pick one of the hub's File Manager audio files from a list (length estimated), or enter a web address with a short how-to and checks.
  *  0.4.1 - 2026-10-26 - Next on an edit page saves like Save; new items no longer get lost or duplicated when Hubitat redraws pages.
@@ -41,7 +42,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.4.3"
+@Field static final String APP_VERSION = "0.5.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -83,6 +84,8 @@ import java.util.concurrent.Semaphore
                                                        "120": "2 hours", "180": "3 hours", "240": "4 hours"]
 @Field static final String SND_URL_TIP = "A web address the speaker can play, e.g. an MP3 uploaded to the hub's File Manager: " +
     "http://<hub-ip>/local/<file>.mp3. Speakers that can't play files (no playTrack) skip the sound."
+@Field static final String SND_URL_KEY = "__url"          // the Sound menu's last option: "Use a web address (URL)…"
+@Field static final String HUB_BLOCKED_MSG = "The hub didn't let Switchboard read its own pages, so 'From' shows unknown and the hub sound list is empty. Everything else works."
 
 // ---- in-memory speech engine state, per app instance (cleared on hub reboot / code save)
 @Field static ConcurrentHashMap<Long, ConcurrentLinkedQueue<Map>> Q_NORMAL = new ConcurrentHashMap<>()
@@ -318,7 +321,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
     ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
-    snd : ["name", "src", "file", "url", "secs"],
+    snd : ["name", "file", "url", "secs"],
     gm  : ["name", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs"]
 ]
 private void removeItemSettings(String kind, String id) {
@@ -326,6 +329,11 @@ private void removeItemSettings(String kind, String id) {
     Set<String> keys = (settings.keySet().findAll { it.startsWith(pre) }.collect { it as String }) as Set
     ((ITEM_INPUTS[kind] ?: []) as List).each { keys << "${pre}${it}".toString() }
     keys.each { String k -> try { app.removeSetting(k) } catch (e) { logDebug "removeSetting ${k}: ${e}" } }
+    if (kind == "snd") forgetSndPick(id)
+}
+private void forgetSndPick(String sid) {
+    Map pk = (state.sndPick ?: [:]) as Map
+    if (pk.containsKey(sid)) { pk.remove(sid); state.sndPick = pk }
 }
 
 /** a new item: next real id, kept as a draft (no device, invisible to the runtime) until Save */
@@ -709,26 +717,45 @@ def soundEditPage(params = null) {
         String pre = "snd_${sid}_"
         String url = draft ? (settings[pre + "url"] ?: "").toString().trim() : (soundUrl(sid) ?: "")
         Map files = hubAudioFiles()
-        String oldUrl = (settings[pre + "url"] ?: "").toString()
-        String srcDflt = (oldUrl && !oldUrl.contains("/local/")) || !files ? "url" : "hub"
+        String setUrl = (settings[pre + "url"] ?: "").toString().trim()
+        String urlFile = hubFileOf(setUrl, files)                      // the listed hub file the URL points to, if any
+        boolean isLocal = setUrl ==~ /(?i)^https?:\/\/[^\/]+\/local\/.+/
+        String dflt = urlFile ?: ((setUrl && !isLocal) || !files ? SND_URL_KEY : null)
+        // the menu value this page last saw for each sound: a value that differs was just picked
+        Map picks = (state.sndPick ?: [:]) as Map
+        String cur = settings[pre + "file"] as String
+        if (!picks.containsKey(sid)) {
+            // first look: a leftover value that doesn't match the sound's URL must not change it, so show what the URL says
+            if (setUrl && cur != dflt) {
+                if (dflt) app.updateSetting(pre + "file", [type: "enum", value: dflt]) else app.removeSetting(pre + "file")
+                cur = dflt
+            }
+            picks[sid] = cur ?: dflt ?: ""                 // "" = nothing picked (state may drop null values)
+            state.sndPick = picks
+        }
+        String sel = cur ?: dflt
+        boolean picked = ((picks[sid] ?: "") as String) != (sel ?: "")
+        if (picked) { picks[sid] = sel ?: ""; state.sndPick = picks }
         section(uiTitle(null, "Sound")) {
-            input pre + "src", "enum", title: "Where is the sound?", submitOnChange: true, width: 6,
-                  options: [hub: "A sound file on this hub", url: "A web address (URL)"], defaultValue: srcDflt
-            if ((settings[pre + "src"] ?: srcDflt) == "hub") {
-                input pre + "file", "enum", title: "Sound file" + tip("Files in Hubitat → Settings → File Manager. Upload an .mp3 there to see it here."),
-                      options: files.collectEntries { k, v -> [(k): "${k}  (${v.kb} KB)".toString()] }, submitOnChange: true, width: 6
-                if (!files) paragraph warn("No sound files found on the hub. Upload an .mp3 in Settings → File Manager, or use a web address.")
-                String f = settings[pre + "file"] as String
-                if (f && files[f]) {
-                    String want = hubFileUrl(f)
-                    if (settings[pre + "url"] != want) {
-                        app.updateSetting(pre + "url", [type: "text", value: want])
-                        app.updateSetting(pre + "secs", [type: "number", value: files[f].secs])      // a new file: estimate its length
-                        if (!cleanName(settings[pre + "name"] as String)) app.updateSetting(pre + "name", [type: "text", value: f.replaceAll(/\.[^.]+$/, "")])
-                    }
+            Map opts = files.collectEntries { k, v -> [(k): "${k}  (${v.kb} KB)".toString()] }
+            opts[SND_URL_KEY] = "🌐 Use a web address (URL)…"
+            Map a = [name: pre + "file", type: "enum", title: "Sound" + tip("Files in Hubitat → Settings → File Manager (upload an .mp3 there to see it here), or a web address."),
+                     options: opts, required: false, submitOnChange: true, width: 8]
+            if (dflt) a.defaultValue = dflt
+            input a
+            if (!files) paragraph warn("No sound files found on the hub — upload an .mp3 in Settings → File Manager, or use a web address")
+            if (sel && sel != SND_URL_KEY && files[sel]) {
+                if (picked || !setUrl) {
+                    String want = hubFileUrl(sel)
+                    if (setUrl != want) app.updateSetting(pre + "url", [type: "text", value: want])
+                    app.updateSetting(pre + "secs", [type: "number", value: files[sel].secs])      // a new file: estimate its length
+                    if (!cleanName(settings[pre + "name"] as String)) app.updateSetting(pre + "name", [type: "text", value: sel.replaceAll(/\.[^.]+$/, "")])
                     url = want
                 }
-            } else {
+            } else if (sel != SND_URL_KEY && setUrl) {
+                paragraph note("Plays: ${esc(setUrl)}")
+            }
+            if (sel == SND_URL_KEY) {
                 input pre + "url", "text", title: "Web address (URL)", submitOnChange: true, width: 12
                 paragraph uiHint("Paste a <b>direct link to the audio file</b>. It must end in <b>.mp3</b> (or .wav / .m4a), not a web page.<br>" +
                                  "✓ <code>http://192.168.1.20/sounds/doorbell.mp3</code> — a file on your network<br>" +
@@ -740,7 +767,7 @@ def soundEditPage(params = null) {
                 else if (u && !(u.replaceAll(/[?#].*$/, "") ==~ /(?i).*\.(mp3|wav|m4a|aac|ogg|flac)$/)) paragraph warn("That doesn't look like an audio file link (it should end in .mp3, .wav or .m4a). It may be a web page.")
             }
             input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
-            input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays; the next message waits this long. For hub files this is estimated from the file size — adjust if it cuts off or waits too long."),
+            input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays; the next message waits this long, unless the speaker reports the real length (Sonos does). For hub files this is estimated from the file size — adjust if it cuts off or waits too long."),
                   range: "1..3600", defaultValue: 5, submitOnChange: true, width: 3
             if (!url) paragraph warn(draft ? "Pick a file or enter a web address." : "Pick a file or enter a web address, or this sound is skipped.")
         }
@@ -763,26 +790,43 @@ def soundEditPage(params = null) {
 private Map hubAudioFiles() {
     Map out = [:]
     try {
-        Map p = [uri: "http://127.0.0.1:8080/hub/fileManager/json", timeout: 5]
-        if (state.hubCookie) p.headers = [Cookie: state.hubCookie as String]
-        httpGet(p) { resp ->
-            def files = resp.data?.files
-            (files ?: []).findAll { it.type == "file" && (it.name as String) ==~ /(?i).*\.(mp3|wav|m4a|aac|ogg|flac)$/ }
+        httpGet([uri: "http://127.0.0.1:8080/hub/fileManager/json", timeout: 5]) { resp ->
+            def d = resp.data
+            if (!(d instanceof Map)) { hubReadResult(false); return }       // a login page or other HTML, not the list
+            hubReadResult(true)
+            (d.files ?: []).findAll { it instanceof Map && it.type == "file" && (it.name as String) ==~ /(?i).*\.(mp3|wav|m4a|aac|ogg|flac)$/ }
                           .sort { (it.name as String).toLowerCase() }
                           .each { f ->
-                long b = ((f.size ?: 0) as String).toLong()
+                long b = 0L
+                try { b = ((f.size ?: 0) as String).toLong() } catch (ignored) { }
                 out[f.name as String] = [kb: (int) Math.max(1L, (long) (b / 1024)), secs: (int) Math.max(1L, Math.min(3600L, (long) Math.ceil(b / 16000.0d)))]
             }
         }
-    } catch (e) { logDebug "File Manager list: ${e}" }
+    } catch (e) {
+        if (e.toString() =~ /(?i)\b40[13]\b|unauthori[sz]ed|forbidden/) hubReadResult(false)
+        logDebug "File Manager list: ${e}"
+    }
     return out
 }
+private String hubFileName(String name) { URLEncoder.encode(name, 'UTF-8').replace('+', '%20') }
 /** URL a speaker can fetch a hub file from */
 private String hubFileUrl(String name) {
     String ip = null
     try { ip = location.hub?.localIP } catch (ignored) { }
     if (!ip) try { ip = location.hubs[0]?.getDataValue("localIP") } catch (ignored) { }
-    return "http://${ip ?: '127.0.0.1'}/local/${URLEncoder.encode(name, 'UTF-8').replace('+', '%20')}".toString()
+    return "http://${ip ?: '127.0.0.1'}/local/${hubFileName(name)}".toString()
+}
+/** the listed hub file a URL points to (http://<host>/local/<file>), or null */
+private String hubFileOf(String url, Map files) {
+    String u = (url ?: "").trim().replaceAll(/[?#].*$/, "")
+    if (!u || !files || !(u ==~ /(?i)^https?:\/\/[^\/]+\/local\/.+/)) return null
+    return files.keySet().find { String k -> u.endsWith("/local/" + hubFileName(k)) || u.endsWith("/local/" + k) } as String
+}
+
+/** the hub's own pages (events, app status, File Manager) answered, or refused / sent a login page */
+private void hubReadResult(boolean ok) {
+    if (ok) { if (state.hubReadBlocked) state.remove("hubReadBlocked") }
+    else if (!state.hubReadBlocked) { state.hubReadBlocked = true; log.warn "${APP_TITLE}: ${HUB_BLOCKED_MSG}" }
 }
 
 // ------------------------------------------------------------------ Speakers & queue
@@ -960,6 +1004,7 @@ def logPage(params = null) {
         List all = logEntries()
         section {
             paragraph pageHead("Message log", "${APP_TITLE} · last ${LOG_MAX} messages")
+            if (state.hubReadBlocked) paragraph warn(HUB_BLOCKED_MSG)
         }
         section {
             input "logDev", "enum", title: "Device", options: all.collect { it.dev as String }.findAll { it }.unique().sort(),
@@ -1070,16 +1115,14 @@ def settingsPage(params = null) {
             paragraph note("The switch is created or removed when you press Done on the main page.")
         }
         section(uiTitle(null, "Sounds from rules")) {
-            input "defaultTrackSecs", "number", title: "Length of a playTrack sound that isn't in Sound files (seconds)" + tip("The queue waits this long before the next message."),
+            input "defaultTrackSecs", "number", title: "If a speaker doesn't report a track's length, assume (seconds)" +
+                  tip("Only used for tracks Switchboard doesn't know the length of, and only when the speaker doesn't report it (Sonos does). It decides how long the next announcement waits and when the volume goes back. It never cuts a track short."),
                   range: "1..3600", defaultValue: 10, width: 6
         }
         section(uiTitle(null, "Which rule sent it?")) {
             input "srcLookup", "bool", title: "Find which rule sent each message" + tip("Shortly after a message arrives, Switchboard reads the device's event list on this hub to find the rule or app that sent it, and shows it in the log. It never delays the message. A message starting with [Name] uses that name instead."),
-                  defaultValue: true, submitOnChange: true
-            if (srcLookup != false) {
-                input "hubUser", "text", title: "Hub username (optional)" + tip("Only needed if Hub Login Security is on."), required: false, width: 6
-                input "hubPass", "password", title: "Hub password (optional)", required: false, width: 6
-            }
+                  defaultValue: true
+            if (state.hubReadBlocked) paragraph warn(HUB_BLOCKED_MSG)
         }
         section(uiTitle(null, "Logging")) {
             input "logEnable", "bool", title: "Debug logging (turns off after 30 minutes)", defaultValue: false
@@ -1240,7 +1283,8 @@ List<String> soundIds() {
 private void deleteSound(String sid) {
     Map m = state.sounds ?: [:]
     m.remove(sid); state.sounds = m
-    ["snd_${sid}_name", "snd_${sid}_url", "snd_${sid}_secs"].each { app.removeSetting(it as String) }
+    ["snd_${sid}_name", "snd_${sid}_file", "snd_${sid}_url", "snd_${sid}_secs"].each { app.removeSetting(it as String) }
+    forgetSndPick(sid)
     ids("prof").each { pid -> if (settings["prof_${pid}_chime"] == sid) app.removeSetting("prof_${pid}_chime") }
 }
 private void syncSounds() {
@@ -1938,42 +1982,24 @@ private void scheduleLookup(def child, String dni, String cmd, String rawText, S
     Map data = [dni: dni, devId: child.id.toString(), cmd: cmd ?: "", text: (rawText ?: "").take(40), at: now(), logId: logId]
     runInMillis(1500, "srcLookupRun", [overwrite: false, data: data])
 }
+/** The hub lets its own apps read 127.0.0.1:8080 without logging in (also with Hub Login Security on). */
 void srcLookupRun(Map data) {
-    try {
-        if (hubUser && hubPass && (!state.hubCookie || now() - ((state.hubCookieAt ?: 0) as Long) > 6 * 3600000L)) {
-            asynchttpPost("srcLoginResp", [uri: "http://127.0.0.1:8080", path: "/login",
-                          requestContentType: "application/x-www-form-urlencoded",
-                          body: [username: hubUser, password: hubPass, submit: "Login"], timeout: 10], data)
-        } else {
-            srcFetch(data)
-        }
-    } catch (e) { logDebug "source lookup: ${e}"; applySource(data, "unknown") }
-}
-void srcLoginResp(resp, Map data) {
-    try {
-        Map h = (resp.headers ?: [:]) as Map
-        String ck = h.find { kk, v -> kk?.toString()?.equalsIgnoreCase("Set-Cookie") }?.value?.toString()
-        if (ck) { state.hubCookie = ck.split(";")[0]; state.hubCookieAt = now() }
-        else logDebug "hub login: no cookie (status ${resp.status})"
-    } catch (e) { logDebug "hub login: ${e}" }
     try { srcFetch(data) } catch (e) { logDebug "source lookup: ${e}"; applySource(data, "unknown") }
 }
 private void srcFetch(Map data) {
-    Map p = [uri: "http://127.0.0.1:8080/device/eventsJson/${data.devId}".toString(), timeout: 10]
-    if (state.hubCookie) p.headers = [Cookie: state.hubCookie as String]
-    asynchttpGet("srcLookupResp", p, data)
+    asynchttpGet("srcLookupResp", [uri: "http://127.0.0.1:8080/device/eventsJson/${data.devId}".toString(), timeout: 10], data)
 }
 /** Undocumented endpoint: every step is guarded and anything unexpected gives "unknown". */
 void srcLookupResp(resp, Map data) {
     String src = null
     try {
         int st = resp.status as int
-        if (st == 401 || st == 403) state.remove("hubCookie")
+        if (st == 401 || st == 403) hubReadResult(false)
         if (st == 200) {
             def body = null
             try { body = resp.json } catch (ignored) { }
             if (body == null) { try { body = parseJson(resp.data as String) } catch (ignored) { } }
-            if (body == null && hubUser) state.remove("hubCookie")         // probably the login page
+            hubReadResult(body != null)                                     // null: HTML (a login page?), not JSON
             List rows = []
             if (body instanceof List) rows = body as List
             else if (body instanceof Map) rows = (body.events ?: body.data ?: body.rows ?: []) as List
@@ -2004,16 +2030,19 @@ private void withRuleSystem(String appId, String name, Map data) {
     Map cache = (state.appSys ?: [:]) as Map
     if (cache.containsKey(appId)) { applySource(data, sysLabel(cache[appId] as String, name)); return }
     Map p = [uri: "http://127.0.0.1:8080/installedapp/statusJson/${appId}".toString(), timeout: 10]
-    if (state.hubCookie) p.headers = [Cookie: state.hubCookie as String]
     try { asynchttpGet("srcTypeResp", p, data + [appId: appId, srcName: name]) }
     catch (e) { logDebug "rule system lookup: ${e}"; applySource(data, name) }
 }
 void srcTypeResp(resp, Map data) {
     String type = null
     try {
-        if ((resp.status as int) == 200) {
-            def body = resp.json
-            type = (body?.installedApp?.name ?: body?.installedApp?.appType?.name) as String      // e.g. "webCoRE Piston", "Rule-5.1"
+        int st = resp.status as int
+        if (st == 401 || st == 403) hubReadResult(false)
+        if (st == 200) {
+            def body = null
+            try { body = resp.json } catch (ignored) { }
+            hubReadResult(body != null)                                     // null: HTML (a login page?), not JSON
+            if (body instanceof Map) type = (body?.installedApp?.name ?: body?.installedApp?.appType?.name) as String      // e.g. "webCoRE Piston", "Rule-5.1"
         }
     } catch (e) { logDebug "rule system parse: ${e}" }
     String name = data.srcName as String
@@ -2624,6 +2653,7 @@ private long playItem(Map item, List devs, boolean urgent) {
  */
 private long playTrackOn(Map item, String url, Integer secs, String name, List devs, Integer vol) {
     if (!url) return 0L
+    long sentAt = now()
     List played = [], later = []
     devs.each { dev ->
         try {
@@ -2654,10 +2684,98 @@ private long playTrackOn(Map item, String url, Integer secs, String name, List d
     }
     if (!played) return 0L
     item.played = true
+    long startedAt = now()
+    Integer assumed = (secs ?: 5) as Integer
     BigDecimal lead = played.collect { (settings["spkLead_${it.id}"] ?: 0) as BigDecimal }.max() ?: 0
-    BigDecimal wait = (secs ?: 5) + lead + ((gapSec != null ? gapSec : 2) as BigDecimal)
+    BigDecimal extra = lead + ((gapSec != null ? gapSec : 2) as BigDecimal)
+    BigDecimal wait = assumed + extra
+    long end = startedAt + ((wait * 1000) as long)
     logInfo "Playing ${name} (${wait}s) on ${played*.displayName.join(', ')} @${vol != null ? vol : '-'}" + (item.source ? " [${item.source}]" : "")
-    return now() + ((wait * 1000) as long)
+    // ask the speakers how long the track really is once it has started (Sonos reports trackDuration)
+    runInMillis(TRACK_LEN_WAIT, "trackLengthCheck", [overwrite: false, data: [ids: played.collect { it.id.toString() }, sent: sentAt, start: startedAt,
+                 end: end, assumed: assumed, extraMs: ((extra * 1000) as long), dni: (item.dni ?: "") as String, url: url, name: name]])
+    return end
+}
+
+@Field static final long TRACK_LEN_WAIT = 2000L
+
+/**
+ * ~2 s after a track or sound file starts: if the speakers report its length (trackDuration) and it differs from what
+ * was assumed, move that item's busy end (and so the volume restore) to start + reported length + lead + gap, then
+ * let the queue reschedule its wake-up. Only BUSY entries still carrying this part's original end are changed
+ * (a later part or item, a stop or Stop all is never undone).
+ */
+void trackLengthCheck(Map data) {
+    try {
+        long start = (data?.start ?: 0L) as long, oldEnd = (data?.end ?: 0L) as long, sent = (data?.sent ?: start) as long
+        Integer assumed = (data?.assumed ?: 0) as Integer
+        String dni = (data?.dni ?: "") as String
+        Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
+        ConcurrentHashMap<String, Map> busy0 = mapFor(BUSY)
+        List<Integer> lens = []
+        ((data?.ids ?: []) as List).each { id ->
+            def dev = byId[id as String]
+            if (!dev) return
+            // only speakers still busy with this part: one taken over by another item (an urgent one) reports that item's length
+            Map b = busy0[id as String]
+            if (!b || ((b.until ?: 0L) as long) != oldEnd || ((b.dni ?: "") as String) != dni) return
+            Integer s = reportedTrackSecs(dev, sent, data.url as String)
+            if (s) lens << s
+        }
+        if (!lens) { logDebug "No track length reported for ${data?.name}; keeping ${assumed}s"; return }
+        Integer real = lens.max()
+        if (real == assumed) return
+        long newEnd = start + real * 1000L + ((data.extraMs ?: 0L) as long)
+        int n = 0
+        Semaphore lock = lockFor()
+        boolean got = false
+        try { got = lock.tryAcquire(2000L, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (ignored) { }
+        try {
+            mapFor(BUSY).values().each { Map v ->
+                if (((v.until ?: 0L) as long) == oldEnd && ((v.dni ?: "") as String) == dni) { v.until = newEnd; n++ }
+            }
+        } finally { if (got) lock.release() }
+        if (!n) return                                     // that part already finished or was stopped
+        logInfo "${data.name}: the speaker reports ${real}s (assumed ${assumed}s); the queue and volume restore follow it"
+        processQueue()                                     // reschedules its wake-up for the new end
+    } catch (e) { logDebug "track length check: ${e}" }
+}
+
+/** seconds the speaker reports for the track it plays, or null (unknown / blank / 0 / left over from an earlier track) */
+private Integer reportedTrackSecs(dev, long sent, String url) {
+    try {
+        def st = null
+        try { st = dev.currentState("trackDuration", true) } catch (ignored) { st = dev.currentState("trackDuration") }
+        if (st == null || st.value == null) return null
+        // when the driver says which track it is playing, it must be ours (not music resumed after a short clip)
+        String playing = null
+        ["trackUri", "currentTrackUri"].each { String a ->
+            if (playing == null) { try { def x = dev.currentValue(a); if (x) playing = x.toString() } catch (ignored) { } }
+        }
+        if (playing == null) {
+            try { def td = dev.currentValue("trackData"); if (td) { def j = parseJson(td.toString()); if (j instanceof Map && j.uri) playing = j.uri.toString() } } catch (ignored) { }
+        }
+        String file = (url ?: "").replaceAll(/[?#].*$/, "").tokenize("/").with { it ? it.last() : "" }
+        String fileDec = file
+        try { fileDec = URLDecoder.decode(file, "UTF-8") } catch (ignored) { }
+        boolean ours = playing && file && (playing.contains(file) || playing.contains(fileDec))
+        if (playing && file && !ours) return null
+        // not updated since we sent the track: an earlier track's (unless the speaker confirms it plays our file —
+        // the same file again sends no new event because the value didn't change)
+        if (!ours && st.date && st.date.time < sent - 500L) return null
+        Integer s = parseTrackSecs(st.value.toString())
+        return (s && s <= 3600) ? s : null                                  // longer: a bogus value (e.g. ms), keep the assumed length
+    } catch (e) { logDebug "trackDuration on ${dev?.displayName}: ${e}"; return null }
+}
+
+/** "0:04:13", "4:13" or "253" (seconds) → 253; null for unknown / blank / 0 */
+private Integer parseTrackSecs(String v) {
+    String s = (v ?: "").trim()
+    if (!s || !(s ==~ /\d+(\.\d+)?(:\d{1,2}(\.\d+)?){0,2}/)) return null
+    BigDecimal total = 0
+    s.tokenize(":").each { String p -> total = total * 60 + (p as BigDecimal) }
+    int r = (int) Math.ceil(total.doubleValue())
+    return r > 0 ? r : null
 }
 
 /** Speak text on all devices; returns the time (epoch ms) until which they are busy (0 if none spoke). */
@@ -2814,6 +2932,7 @@ void updated() {
 void initialize() {
     unsubscribe()
     unschedule()
+    state.remove("hubCookie"); state.remove("hubCookieAt")      // the hub login is gone (0.5.0)
     cleanDrafts()
     ensureGuestSwitches()
     ensureChildren()

@@ -119,9 +119,27 @@ only see what the siren reports); `sirenAlertDevs` (`capability.notification`, m
 turn off" — empty = the Test Mode testers (`tmDevices`); both empty = log + `log.warn` only.
 
 ### Sound files
-As FEATURE_SPEC_v2 §1.1: `state.sounds` id → [name, url, secs]; inputs `snd_<id>_name/_url/_secs` on the sound's
-edit page (a new sound's are the draft's own settings), delete, test (`sndTestSpk` picks the test speaker).
+As FEATURE_SPEC_v2 §1.1: `state.sounds` id → [name, url, secs]; inputs `snd_<id>_file/_url/_name/_secs` on the
+sound's edit page (a new sound's are the draft's own settings), delete, test (`sndTestSpk` picks the test speaker).
 Tip: Hubitat File Manager files are `http://<hub-ip>/local/<file>.mp3`.
+
+**One "Sound" menu (0.5.0):** `snd_<id>_file` (enum) lists the hub's File Manager audio files
+(`hubAudioFiles()`: `GET http://127.0.0.1:8080/hub/fileManager/json`, .mp3/.wav/.m4a/.aac/.ogg/.flac, label
+"name  (N KB)") followed by a last option `__url` "🌐 Use a web address (URL)…".
+- Picking a hub file fills `snd_<id>_url` with `hubFileUrl(file)` (`http://<hub-ip>/local/<encoded name>`), sets
+  `snd_<id>_secs` to the estimate from the file size (128 kbit/s) and fills the name if it is empty.
+- Picking `__url` shows the `snd_<id>_url` text input and, directly under it, the how-to (direct audio link, http
+  vs https, examples) and the URL checks (must start with http(s)://, should end in an audio extension).
+- Default: an existing sound whose URL is not a hub `/local/` URL → `__url`; no audio files on the hub → `__url`;
+  a URL pointing to `/local/<file>` of a listed file → that file; otherwise no default (the user picks). A `/local/`
+  URL of a file that isn't listed shows "Plays: <url>".
+- `state.sndPick` (sound id → the menu value the page last saw) tells a new pick from a redraw: only a changed value
+  (or a file picked while the URL is empty) rewrites the URL / length / name. The first time a sound is shown, a
+  leftover menu value that disagrees with its URL is replaced by what the URL says, so opening a page never changes
+  a sound. Deleting a sound or discarding a draft forgets its entry.
+- Empty list → warning "No sound files found on the hub — upload an .mp3 in Settings → File Manager, or use a web
+  address". (The old `snd_<id>_src` "Where is the sound?" input is gone; no back-compat.)
+- `snd_<id>_secs` "Length (seconds)": used until the speaker reports the real length (§4, track length).
 
 ### Speakers & queue
 Per real speaker: method (auto / echo / setThenSpeak / speakVol / playTextRestore / speakOnly), extra wait, delay
@@ -177,9 +195,15 @@ duplicate / skipped stale / skipped guest / test → testers / failed, source). 
 by device and outcome; "Clear log" button.
 
 ### Settings
-`nightStart`, `nightEnd`; `homeSensors` (presence, for "only when nobody is home"); `srcLookup` bool "Find which
-rule sent each message" (default on); optional `hubUser`/`hubPass` for Hub Security (tip: only needed if Hub Login
-Security is on); logging (debug auto-off 30 min, description).
+`nightStart`, `nightEnd`; `homeSensors` (presence, for "only when nobody is home"); `defaultTrackSecs` "If a
+speaker doesn't report a track's length, assume (seconds)" (default 10; tip: only used for tracks Switchboard doesn't
+know the length of, and only when the speaker doesn't report it (Sonos does); it decides how long the next
+announcement waits and when the volume goes back; it never cuts a track short); `srcLookup` bool "Find which rule
+sent each message" (default on); logging (debug auto-off 30 min, description).
+There is **no hub login** (0.5.0 removed `hubUser` / `hubPass`): the hub lets its own apps read
+`127.0.0.1:8080` pages without logging in, also with Hub Login Security on. If such a read is refused anyway
+(`state.hubReadBlocked`, see Source lookup), the Settings page and the Message log page show: "The hub didn't let
+Switchboard read its own pages, so 'From' shows unknown and the hub sound list is empty. Everything else works."
 
 **Stopping alarms** section: `stopOnDisarm` bool (default on) "When Safety Monitor is disarmed or cancels its alert,
 stop all sirens and sounds"; `stopSwitchOn` bool (default on) "Create a 'Switchboard – Stop All' switch for
@@ -189,7 +213,7 @@ dashboards, buttons and voice" (created / deleted on Done). The main page's "Rig
 **Draft / delete cleanup:** removing an item's settings removes every `<kind>_<id>_` key in `settings` *and* every
 known input name of that kind (an empty device picker is not in `settings.keySet()`): prof name, priority, spk,
 volMode, dayVol, nightVol, fixedVol, chime, dedupeSec, staleSec; ntf name, devs, when, dedupeSec, prefix, pushover;
-sir name, devs, maxMin; (all three) guestPlay, guestQuiet, guestOther; snd name, url, secs; gm name, source, switch,
+sir name, devs, maxMin; (all three) guestPlay, guestQuiet, guestOther; snd name, file, url, secs; gm name, source, switch,
 modes, endDate, endTime, defaultHours, remindTime, remindDevs.
 
 ## 4. Behaviour
@@ -201,6 +225,18 @@ Order per profile item: chime → sound/track → text; busy time = sound secs o
 Track playback: `playTrackAndRestore(url, vol)` if supported, else set volume + `playTrack(url)` and restore after
 `secs`. A `playTrack(uri)` from a rule whose uri matches a library sound uses that sound's length; otherwise
 `defaultTrackSecs` (Settings, default 10).
+
+**Real track length (0.5.0):** every track / sound part that starts on real speakers (`playTrackOn`) schedules
+`trackLengthCheck` 2 s later (`runInMillis`, `overwrite: false`, data: speaker ids, sent / start time, assumed secs,
+the busy end it returned, lead + gap in ms, dni, url, name). It reads each speaker's `trackDuration` (Sonos: "0:04:13"
+or "4:13"; also plain seconds; "unknown" / blank / 0 ignored). A value is only trusted if its event is newer than
+the moment the track was sent (otherwise it is an earlier track's), and — when the driver reports `trackUri` /
+`currentTrackUri` — only if that names our file (not music resumed after a short clip). The longest reported length
+wins; if it differs from the assumed one, every `BUSY` entry that still carries that part's original end and dni
+(its speakers, and "ALL" in global mode) gets `until = start + reported + lead + gap`, then `processQueue()` runs and
+reschedules its wake-up. Volume restore follows automatically (it waits until the speaker is no longer busy). Entries
+already replaced (next part, next item) or removed (stop / Stop all) are never touched. Library sounds use their
+`secs` until the speaker reports a length (reported wins); a speaker that reports nothing keeps the assumed length.
 
 **stop():** removes the *waiting* items of that virtual speaker. If the item currently playing came from that same
 virtual speaker, also sends `stop()` to its real speakers and frees the queue. Never touches other devices' items.
@@ -217,7 +253,7 @@ name).
 message is a duplicate within dedupe — testers see every event; tester dedupe 2 s only).
 
 **Source lookup:** ~1500 ms after a command arrives, `asynchttpGet` `http://127.0.0.1:8080/device/eventsJson/<deviceId>`
-(cookie from optional login), find the newest `type == "command"` row for that command within ±5 s (and matching
+(no login: the hub lets its own apps read these pages), find the newest `type == "command"` row for that command within ±5 s (and matching
 text where present), strip HTML from `producedBy` → source name (e.g. "Goodnight 🌙"). Update the log entry and the
 device's `lastSource`. The `producedBy` link's app id is then looked up once (`/installedapp/statusJson/<appId>` → `installedApp.name`,
 e.g. "webCoRE Piston", "Rule-5.1") and cached, so the source reads "WC – Goodnight" (WC webCoRE, RM Rule Machine,
@@ -227,6 +263,10 @@ Real speakers are only ever driven from Switchboard's own scheduled run (never i
 speaker's Events page always credits "Switchboard". Cost ≈ 0.3 s.
 Text prefix `[Name] ` at the start of a message overrides the lookup and is removed before
 speaking/pushing. Failures → "unknown"; never delays delivery. Undocumented endpoint: wrap all parsing in try/catch.
+**Refused reads:** if `eventsJson`, `statusJson` or the File Manager list answers 401 / 403 or with something that
+isn't JSON (HTML, e.g. a login page), `state.hubReadBlocked = true` (one `log.warn`); the next successful read clears
+it. While set, Settings and Message log show the short note (see Settings). Timeouts and other errors don't set it.
+`initialize()` removes the old `state.hubCookie` (and `hubCookieAt`).
 
 **Hub restart:** `systemStart` → Test Mode off (push to testers), re-initialize, clear stale busy state. The queue
 lives in memory, so messages still waiting at a reboot or code save are lost; their log entries say
