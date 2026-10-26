@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.3 - 2026-10-26 - Message log shows which rules system sent each message (WC, RM, BR, HSM…), with a legend.
  *  0.1.2 - 2026-10-26 - Switchboard's own devices are never used as real speakers, phones or sirens (would loop).
  *  0.1.1 - 2026-10-26 - Name, URL, tester and end-time fields save as you leave them (buttons couldn't see unsaved text).
  *  0.1.0 - 2026-10-26 - First build from Rule Forge 0.5.0's speech engine.
@@ -28,7 +29,21 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.2"
+@Field static final String APP_VERSION = "0.1.3"
+// rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
+@Field static final List<List> RULE_SYSTEMS = [
+    ["^webCoRE", "WC", "webCoRE"],
+    ["^Rule-|^Rule Machine", "RM", "Rule Machine"],
+    ["^Basic Rule", "BR", "Basic Rules"],
+    ["Safety Monitor", "HSM", "Safety Monitor"],
+    ["^Room Light", "RL", "Room Lighting"],
+    ["^Button Controller|^Button Rule", "BC", "Button Controllers"],
+    ["^Simple Automation", "SAR", "Simple Automation Rules"],
+    ["^Notifier|^Notification", "NT", "Notifications"],
+    ["^Maker API", "API", "Maker API"],
+    ["Dashboard", "DB", "Dashboards"],
+    ["^Switchboard", "SB", "Switchboard"]
+]
 @Field static final String NS          = "almulder"
 @Field static final String APP_TITLE   = "Switchboard"
 @Field static final int    LOG_MAX     = 200
@@ -561,6 +576,8 @@ def logPage() {
             input "logOutcome", "enum", title: "Outcome", options: all.collect { it.outcome as String }.findAll { it }.unique().sort(),
                   required: false, submitOnChange: true, width: 4
             List l = all.findAll { (!logDev || it.dev == logDev) && (!logOutcome || it.outcome == logOutcome) }
+            paragraph note("<b>From:</b> " + RULE_SYSTEMS.findAll { it[1] != "SB" }.collect { "${it[1]} = ${it[2]}" }.join(" · ") +
+                           ". Any other app shows its own type, e.g. <i>Rule Forge – Office Door</i>.")
             paragraph l ? logTable(l) : note("Nothing to show.")
             input "btnClearLog", "button", title: "Clear log"
         }
@@ -1192,10 +1209,47 @@ void srcLookupResp(resp, Map data) {
             List withText = txt ? cands.findAll { r -> r.descriptionText != null && (r.descriptionText as String).contains(txt.take(30)) } : []
             List pick = withText ?: cands
             Map best = pick ? (pick.max { r -> rowTime(r as Map) ?: 0L } as Map) : null
-            if (best?.producedBy) src = plain(best.producedBy as String).replace("&amp;", "&").trim()
+            if (best?.producedBy) {
+                src = plain(best.producedBy as String).replace("&amp;", "&").trim()
+                String appId = ((best.producedBy as String) =~ /installedapp\/configure\/(\d+)/).with { it.find() ? it.group(1) : null }
+                if (src && appId) { withRuleSystem(appId, src, data); return }
+            }
         }
     } catch (e) { logDebug "source lookup parse: ${e}" }
     applySource(data, src ?: "unknown")
+}
+
+/** Adds which rules system sent it ("WC – Goodnight"): looks up the sending app's type once, then remembers it. */
+private void withRuleSystem(String appId, String name, Map data) {
+    Map cache = (state.appSys ?: [:]) as Map
+    if (cache.containsKey(appId)) { applySource(data, sysLabel(cache[appId] as String, name)); return }
+    Map p = [uri: "http://127.0.0.1:8080/installedapp/statusJson/${appId}".toString(), timeout: 10]
+    if (state.hubCookie) p.headers = [Cookie: state.hubCookie as String]
+    try { asynchttpGet("srcTypeResp", p, data + [appId: appId, srcName: name]) }
+    catch (e) { logDebug "rule system lookup: ${e}"; applySource(data, name) }
+}
+void srcTypeResp(resp, Map data) {
+    String type = null
+    try {
+        if ((resp.status as int) == 200) {
+            def body = resp.json
+            type = (body?.installedApp?.name ?: body?.installedApp?.appType?.name) as String      // e.g. "webCoRE Piston", "Rule-5.1"
+        }
+    } catch (e) { logDebug "rule system parse: ${e}" }
+    String name = data.srcName as String
+    if (type) {
+        Map cache = (state.appSys ?: [:]) as Map
+        if (cache.size() > 300) cache = [:]
+        cache[data.appId as String] = type
+        state.appSys = cache
+    }
+    applySource(data, type ? sysLabel(type, name) : name)
+}
+/** "WC – Goodnight" for known rules systems, "<app type> – name" for any other app, just the name if they're the same */
+private String sysLabel(String type, String name) {
+    List hit = RULE_SYSTEMS.find { (type =~ (it[0] as String)).find() }
+    if (hit) return "${hit[1]} – ${name}".toString()
+    return (type && type != name) ? "${type} – ${name}".toString() : name
 }
 private Long rowTime(Map r) {
     try {
