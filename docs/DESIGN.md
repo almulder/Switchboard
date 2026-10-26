@@ -113,6 +113,11 @@ normal / quiet / only, `ntf_<id>_prefix` (optional text added before each messag
 `sir_<id>_name`, `sir_<id>_devs` (`capability.alarm`, multiple, tip: some devices claim Alarm but aren't sirens, e.g.
 power monitors), `sir_<id>_maxMin` "Stop after (minutes)" default 5, `sir_<id>_guest` normal / quiet.
 
+**Make sure sirens turn off** section (on the Sirens list page): `sirenVerify` bool (default on) "Check that sirens
+really turn off and retry" (tip: checks 2 s after the off, every 2 s for 10 s, then every 15 s up to 10 min; it can
+only see what the siren reports); `sirenAlertDevs` (`capability.notification`, multiple) "Tell me if a siren won't
+turn off" — empty = the Test Mode testers (`tmDevices`); both empty = log + `log.warn` only.
+
 ### Sound files
 As FEATURE_SPEC_v2 §1.1: `state.sounds` id → [name, url, secs]; inputs `snd_<id>_name/_url/_secs` on the sound's
 edit page (a new sound's are the draft's own settings), delete, test (`sndTestSpk` picks the test speaker).
@@ -241,6 +246,31 @@ lives in memory, so messages still waiting at a reboot or code save are lost; th
 - logs one entry (kind "stop", device "Switchboard", text = why, outcome "stopped") and an info line — only when
   something was actually stopped (a siren, a speaker or a dropped waiting item); otherwise debug log only (so a
   cancel followed by a disarm makes one entry, and an everyday disarm makes none).
+
+**Siren off verification (0.4.0, only while `sirenVerify` is on):** every `off()` Switchboard sends to real sirens
+goes through `sirenCommand`, so every path is covered (rule `off`, "Stop after" timer, `stopAll`, the edit page's
+off button, deleting a siren). Each real device sent off goes into `atomicState.sirenVerify` (device id → since,
+tries, alerted, name, sbName, sbDev, rid, next, rf); a device already in the map keeps its clock and tries. One
+handler, `sirenVerifyCheck` (`runInMillis`, overwritten each time, scheduled for the earliest `next`), serves all.
+- A check: if the device has `refresh`, call it and read 1 s later (so reads still land 2 s after each off).
+  "Off" = `alarm` is "off" (if it reports alarm) and `switch` is "off" (if it reports switch); a missing value
+  counts as off (nothing to judge by). Values are read with `currentValue(attr, true)`.
+- Off → removed; if a warning was pushed, push "✓ <name> is off now (after N tries)"; log "off confirmed" when it
+  took more than one try (a first-try success is silent).
+- Still on → `off()` again (Alarm and Switch share the one `off()` command), tries + 1, log "<name> still on — off
+  sent again (try N)" (outcome "retry"); next look 2 s later.
+- After 10 s still on → push once "⚠️ <name> didn't turn off after <n> tries. Still trying." (log outcome "alert"),
+  then look every 15 s (one log entry per try); at 10 min after the first off → push "❌ Gave up on <name> after
+  10 minutes — please check it", log "gave up", drop it.
+- Log entries: kind "siren", device = the Switchboard siren's device label (else "Switchboard"), source Switchboard.
+- Pushes go straight to `sirenAlertDevs` / testers via `pushTo` (Pushover [H]) and bypass Test Mode and Guest Mode
+  routing; each is also a `log.warn`.
+- A siren / strobe / both request that reaches real sirens removes those devices from the map first (a deliberate
+  re-trigger is not fought). The check applies its decisions under `withStateLock` only to entries that are still
+  there with the same `since`; device commands, pushes and log writes run outside the lock.
+- Guest Mode skips and Test Mode never sound real sirens, so they start nothing to verify (an off in Test Mode is still
+  sent and checked — harmless).
+- Hub restart / Done: `initialize()` re-arms the check from the saved map (turning the setting off clears it).
 
 **Turning Test Mode on:** messages still waiting in the queue are pushed to the testers, never dropped. Sirens that
 are already sounding keep sounding until their "Stop after" time (a possibly real alarm is not silenced).

@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.4.0 - 2026-10-26 - Sirens: after any off, Switchboard checks they really turned off and retries; pushes a warning if one is still on after 10 s. A retry never follows a re-trigger, and a siren turned on by something else is left alone.
  *  0.3.0 - 2026-10-26 - Stop alarms: disarming Safety Monitor (or the Stop All switch / button) stops sirens and sounds; draft cleanup removes empty device pickers.
  *  0.2.1 - 2026-10-26 - Every page accepts link parameters (Hubitat passed an edit link's [id] to the list page and it crashed).
  *  0.2.0 - 2026-10-26 - Setup lists open each item on its own page with Save / Delete; new items are drafts until saved.
@@ -37,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.3.0"
+@Field static final String APP_VERSION = "0.4.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -621,6 +622,20 @@ def sirensPage(params = null) {
             }
         }
         addRow("sir")
+        section(uiTitle(null, "Make sure sirens turn off")) {
+            input "sirenVerify", "bool", title: "Check that sirens really turn off and retry" +
+                  tip("Whenever Switchboard turns real sirens off, it checks 2 s later and sends off again if one is still on, " +
+                      "every 2 s for 10 s, then every 15 s for up to 10 minutes. It can only see what the siren reports " +
+                      "(its alarm / switch state; refreshed first when the siren supports it)."),
+                  defaultValue: true, submitOnChange: true
+            if (sirenVerify != false) {
+                input "sirenAlertDevs", "capability.notification", title: "Tell me if a siren won't turn off" +
+                      tip("Pushed straight to these, even in Test Mode or Guest Mode. Empty = the Test Mode testers; " +
+                          "if those are empty too, it is only written to the log."),
+                      multiple: true, required: false
+                if (!sirenAlertDevs && !tmDevices) paragraph warn("Nobody picked: a siren that won't turn off is only written to the log.")
+            }
+        }
     }
 }
 
@@ -946,7 +961,8 @@ private String logTable(List rows) {
     String h = "<table class='sb-log'><tr><th>Time</th><th>Device</th><th>Message</th><th>Outcome</th><th>From</th></tr>"
     rows.each { Map e ->
         String oc = (e.outcome ?: "") as String
-        String kind = oc.startsWith("played") || oc.startsWith("sent") ? "on" : (oc.startsWith("failed") ? "off" : (oc.startsWith("test") || oc.startsWith("queued") ? "warn" : "info"))
+        String kind = oc.startsWith("played") || oc.startsWith("sent") || oc == "off confirmed" ? "on" :
+                      (oc.startsWith("failed") || oc in ["alert", "gave up"] ? "off" : (oc.startsWith("test") || oc.startsWith("queued") || oc == "retry" ? "warn" : "info"))
         h += "<tr><td style='white-space:nowrap'>${fmtShort(e.t as Long)}</td><td>${esc(e.dev as String)}</td>" +
              "<td>${esc(e.kind as String)}: ${esc(e.text as String)}</td><td>${uiPill(oc, kind)}</td><td>${esc((e.source ?: '') as String)}</td></tr>"
     }
@@ -1379,7 +1395,11 @@ void sbSiren(String dni, String mode) {
 /** sends the command to the real sirens; returns how many accepted it */
 private int sirenCommand(String rid, String m) {
     int ok = 0
-    realDevs(settings["sir_${rid}_devs"]).each { dev ->
+    List devs = realDevs(settings["sir_${rid}_devs"])
+    // record this command per device BEFORE sending it (and, for a (re)start, stop any off-verification): the
+    // verifier re-checks this record under the same lock right before a retry off(), so it can never follow a re-trigger
+    Long tok = sirenRecord(devs, m)
+    devs.each { dev ->
         try {
             switch (m) {
                 case "siren":  dev.siren();  break
@@ -1391,7 +1411,236 @@ private int sirenCommand(String rid, String m) {
         } catch (e) { log.error "${APP_TITLE}: ${m} failed on ${dev.displayName}: ${e}" }
     }
     logInfo "Sirens ${itemName('sir', rid)}: ${m} (${ok} device(s))"
+    // every off to real sirens (rule, stop timer, stopAll, button, delete…) passes here: make sure it took
+    if (m == "off") sirenVerifyStart(rid, devs, tok)
     return ok
+}
+
+/**
+ * atomicState.sirenLast: real device id -> [c: last command Switchboard sent (siren|strobe|both|off), n: token].
+ * Tokens strictly increase. A siren/strobe/both also drops the device from the off-verification map.
+ */
+private Long sirenRecord(List devs, String m) {
+    if (!devs) return null
+    Long tok = null
+    Set<String> dropped = [] as Set
+    withStateLock {
+        Map last = (atomicState.sirenLast ?: [:]) as Map
+        long prev = (last.values().collect { ((it?.n ?: 0L) as Long) }.max() ?: 0L) as Long
+        tok = Math.max(now(), prev + 1L)
+        devs.each { last[it.id.toString()] = [c: m, n: tok] }
+        atomicState.sirenLast = last
+        if (m != "off") {
+            Map v = (atomicState.sirenVerify ?: [:]) as Map
+            devs.each { String k = it.id.toString(); if (v.remove(k) != null) dropped << k }
+            if (dropped) atomicState.sirenVerify = v
+        }
+    }
+    if (dropped) { logDebug "Siren off check cancelled (siren sounded again): ${dropped}"; sirenVerifySchedule() }
+    return tok
+}
+
+// ------------------------------------------------------------------ Siren off verification
+// atomicState.sirenVerify: real device id -> [since, tries, alerted, name, sbName, sbDev, rid, next, rf, offT, offAt]
+//   offT/offAt = token (see sirenRecord) and time of the latest Switchboard off this entry stands for.
+//   since = first off (ms), tries = off() sent so far (the first counts), next = when to look again,
+//   rf = refresh() already sent for this look (the read happens 1 s later). One handler, sirenVerifyCheck, serves all.
+@Field static final long SV_FAST_MS  = 2000L      // fast phase: look every 2 s …
+@Field static final long SV_FAST_FOR = 10000L     // … for 10 s, then warn once
+@Field static final long SV_SLOW_MS  = 15000L     // slow phase: every 15 s …
+@Field static final long SV_GIVE_UP  = 600000L    // … until 10 min after the first off
+@Field static final long SV_RF_WAIT  = 1000L      // refresh() this long before reading
+
+private boolean sirenVerifyOn() { settings.sirenVerify != false }
+
+private void sirenVerifyStart(String rid, List devs, Long tok) {
+    if (!sirenVerifyOn() || !devs || tok == null) return
+    long t = now()
+    String sbName = itemName("sir", rid), sbDev = deviceLabel("sir", rid)
+    withStateLock {
+        Map v = (atomicState.sirenVerify ?: [:]) as Map
+        devs.each { dev ->
+            String k = dev.id.toString()
+            // offT = token of the off this entry stands for (a retry off() is sent only while it is still the last command)
+            if (v[k]) { Map e = [:] + (v[k] as Map); e.offT = tok; e.offAt = t; v[k] = e; return }   // already checked: keep clock and tries
+            boolean rf = dev.hasCommand("refresh")
+            v[k] = [since: t, tries: 1, alerted: false, name: dev.displayName as String, sbName: sbName, sbDev: sbDev,
+                    rid: rid, next: t + SV_FAST_MS - (rf ? SV_RF_WAIT : 0L), rf: false, offT: tok, offAt: t]
+        }
+        atomicState.sirenVerify = v
+    }
+    sirenVerifySchedule()
+}
+
+/**
+ * true when the siren is on because of something other than Switchboard (HSM, a rule driving the real device…):
+ * it reported "off" at some point after our off and is on again, or (when its history can't be read) its "on" was
+ * reported more than 5 s after our off. Such a siren is a deliberate new alarm and is never sent off by the verifier.
+ */
+private boolean sirenOnByOther(dev, Map e) {
+    long offAt = ((e.offAt ?: e.since ?: 0L) as Long)
+    if (!offAt) return false
+    Date from = new Date(offAt)
+    boolean other = false
+    ["alarm", "switch"].each { String a ->
+        if (other) return
+        def st = null
+        try { st = dev.currentState(a) } catch (ignored) { }
+        if (st == null || (st.value as String) == "off") return
+        Long stT = null
+        try { stT = st.date?.time } catch (ignored) { }
+        if (stT == null || stT <= offAt) return              // still the on that was there before our off
+        try {
+            List hist = (dev.statesSince(a, from, [max: 50]) ?: []) as List
+            if (hist.any { (it?.value as String) == "off" }) other = true
+        } catch (ignored) {
+            if (stT > offAt + 5000L) other = true
+        }
+    }
+    return other
+}
+
+/** read + (re)schedule under the lock, so a stale read can't unschedule / postpone a check another run just added */
+private void sirenVerifySchedule() {
+    withStateLock {
+        Map v = (atomicState.sirenVerify ?: [:]) as Map
+        if (!v) { unschedule("sirenVerifyCheck"); return }
+        long next = v.values().collect { (it.next ?: 0L) as Long }.min()
+        runInMillis(Math.max(200L, next - now()), "sirenVerifyCheck")
+    }
+}
+
+/** the real siren devices Switchboard knows, by id */
+private Map sirenDevsById() {
+    Map m = [:]
+    ids("sir").each { String rid -> realDevs(settings["sir_${rid}_devs"]).each { m[it.id.toString()] = it } }
+    return m
+}
+
+/** off = alarm "off" (if it reports alarm) and switch "off" (if it reports switch); no value = nothing to judge by */
+private boolean sirenIsOff(dev) {
+    def a = null, s = null
+    try { a = dev.currentValue("alarm", true) } catch (ignored) { try { a = dev.currentValue("alarm") } catch (ignored2) { } }
+    try { s = dev.currentValue("switch", true) } catch (ignored) { try { s = dev.currentValue("switch") } catch (ignored2) { } }
+    return (a == null || a as String == "off") && (s == null || s as String == "off")
+}
+
+void sirenVerifyCheck() {
+    if (!sirenVerifyOn()) { atomicState.sirenVerify = [:]; unschedule("sirenVerifyCheck"); return }
+    Map snap = (atomicState.sirenVerify ?: [:]) as Map
+    if (!snap) return
+    long t = now()
+    Map byId = sirenDevsById()
+    // 1) decide, without holding the lock (reading devices)
+    Map plan = [:]                                   // id -> [act: refresh|done|retry|giveup|gone, e: new entry or null]
+    snap.each { k, e0 ->
+        Map e = [:] + (e0 as Map)
+        if (((e.next ?: 0L) as Long) > t + 100L) return
+        def dev = byId[k as String]
+        if (!dev) { plan[k] = [act: "gone"]; return }
+        boolean hasRf = dev.hasCommand("refresh")
+        if (hasRf && e.rf != true) {
+            e.rf = true; e.next = t + SV_RF_WAIT
+            plan[k] = [act: "refresh", e: e]; return
+        }
+        if (sirenIsOff(dev)) { plan[k] = [act: "done", e: e]; return }
+        if (sirenOnByOther(dev, e)) { plan[k] = [act: "other", e: e]; return }
+        long el = t - ((e.since ?: t) as Long)
+        if (el >= SV_GIVE_UP) { plan[k] = [act: "giveup", e: e]; return }
+        boolean alertNow = el >= SV_FAST_FOR - 500L && e.alerted != true
+        int triesBefore = ((e.tries ?: 1) as Integer)
+        e.tries = triesBefore + 1
+        if (alertNow) e.alerted = true
+        e.rf = false
+        e.next = t + (el >= SV_FAST_FOR - 500L ? SV_SLOW_MS : SV_FAST_MS) - (hasRf ? SV_RF_WAIT : 0L)
+        plan[k] = [act: "retry", e: e, alert: alertNow, before: triesBefore]
+    }
+    if (!plan) { sirenVerifySchedule(); return }
+    // 2) apply under the lock, only to entries still there and unchanged in origin (a re-trigger removes them).
+    //    A retry off() is sent right here, inside the lock, and only while that off is still the device's last
+    //    Switchboard command: sirenRecord takes the same lock before any siren/strobe/both is sent, so a retry
+    //    can never land after a re-trigger.
+    Map go = [:]
+    withStateLock {
+        Map v = (atomicState.sirenVerify ?: [:]) as Map
+        Map last = (atomicState.sirenLast ?: [:]) as Map
+        plan.each { k, p ->
+            Map cur = v[k] as Map
+            if (!cur) return
+            if (p.e && ((cur.since ?: 0L) as Long) != ((p.e.since ?: 0L) as Long)) return
+            if (p.e) { p.e.offT = cur.offT; p.e.offAt = cur.offAt }      // a newer Switchboard off may have moved them
+            if (p.act == "retry") {
+                Map lc = last[k] as Map
+                if (!lc || lc.c != "off" || cur.offT == null || ((lc.n ?: 0L) as Long) != (cur.offT as Long)) {
+                    v.remove(k); go[k] = [act: "superseded", e: p.e]; return
+                }
+                def dev = byId[k as String]
+                try { dev.off() } catch (ex) { log.error "${APP_TITLE}: off failed on ${dev.displayName}: ${ex}" }
+                // Alarm and Switch share the one off() command; a switch-only "on" is covered by the same call
+            }
+            if (p.act in ["refresh", "retry"]) v[k] = p.e else v.remove(k)
+            go[k] = p
+        }
+        atomicState.sirenVerify = v
+    }
+    // 3) act: device commands, pushes, log
+    go.each { k, p ->
+        Map e = p.e as Map
+        def dev = byId[k as String]
+        switch (p.act) {
+            case "gone":
+                logDebug "Siren off check dropped for device ${k}: no longer one of Switchboard's sirens"
+                break
+            case "refresh":
+                try { dev.refresh() } catch (ex) { log.warn "${APP_TITLE}: refresh failed on ${dev.displayName}: ${ex}" }
+                break
+            case "done":
+                int n = (e.tries ?: 1) as Integer
+                if (e.alerted == true) {
+                    sirenAlert("✓ ${e.name} is off now (after ${n} tries)")
+                    sirenVerifyLog(e, "${e.name} is off now (after ${n} tries)", "off confirmed")
+                } else if (n > 1) {
+                    sirenVerifyLog(e, "${e.name} is off (after ${n} tries)", "off confirmed")
+                }
+                break
+            case "giveup":
+                String gm = "❌ Gave up on ${e.name} after 10 minutes — please check it"
+                sirenAlert(gm)
+                sirenVerifyLog(e, "${e.name} still on after 10 min and ${e.tries} tries — gave up", "gave up")
+                break
+            case "superseded":
+                logDebug "Siren off check dropped for ${e?.name ?: k}: Switchboard sent it another command"
+                break
+            case "other":
+                String om = "${e.name} was turned on by something else — not retrying"
+                if (e.alerted == true) sirenAlert("ℹ️ ${om}") else log.warn "${APP_TITLE}: ${om}"
+                sirenVerifyLog(e, om, "not retried")
+                break
+            case "retry":
+                if (p.alert) {
+                    sirenAlert("⚠️ ${e.name} didn't turn off after ${p.before} tries. Still trying.")
+                    sirenVerifyLog(e, "${e.name} didn't turn off after ${p.before} tries — warning sent, off sent again (try ${e.tries})", "alert")
+                } else {
+                    sirenVerifyLog(e, "${e.name} still on — off sent again (try ${e.tries})", "retry")
+                }
+                break
+        }
+    }
+    sirenVerifySchedule()
+}
+
+private void sirenVerifyLog(Map e, String text, String outcome) {
+    String rid = (e.rid ?: "") as String
+    addLog([id: newLogId(), t: now(), dev: (e.sbDev ?: APP_TITLE) as String, dni: rid ? itemDni("sir", rid) : "",
+            kind: "siren", text: text, outcome: outcome, source: APP_TITLE])
+}
+
+/** safety notice: straight to the chosen phones (or the testers), never through Test Mode / Guest Mode routing */
+private void sirenAlert(String msg) {
+    List devs = realDevs(sirenAlertDevs)
+    if (!devs) devs = realDevs(tmDevices)
+    log.warn "${APP_TITLE}: ${msg}"
+    if (devs) pushTo(devs, msg, true)
 }
 private void sirensOff(String rid, String why) {
     sirenCommand(rid, "off")
@@ -2518,8 +2767,9 @@ void initialize() {
     // ---- Guest Modes
     initGuests()
 
-    // ---- sirens still sounding
+    // ---- sirens still sounding, and sirens still being checked after an off (the check survives a reboot / Done)
     scheduleSirenCheck()
+    if (sirenVerifyOn()) sirenVerifySchedule() else atomicState.sirenVerify = [:]
     if (logEnable) runIn(1800, "logsOff")
     if (!qUrgent().isEmpty() || !qNormal().isEmpty() || !mapFor(RESTORE).isEmpty() || !mapFor(BUSY).isEmpty()) runInMillis(500, "processQueue")
 }
