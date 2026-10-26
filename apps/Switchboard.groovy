@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.2.0 - 2026-10-26 - Setup lists open each item on its own page with Save / Delete; new items are drafts until saved.
  *  0.1.8 - 2026-10-26 - Message log keeps the last 100 messages (was 200).
  *  0.1.7 - 2026-10-26 - "From" legend only on the Message log page again (removed from the main page).
  *  0.1.6 - 2026-10-26 - Message log filters by From (a rules system or one rule) and by When (quick ranges or between dates).
@@ -34,7 +35,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.8"
+@Field static final String APP_VERSION = "0.2.0"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -103,12 +104,17 @@ definition(
 preferences {
     page(name: "mainPage")
     page(name: "profilesPage")
+    page(name: "profileEditPage")
     page(name: "notifyPage")
+    page(name: "notifyEditPage")
     page(name: "sirensPage")
+    page(name: "sirenEditPage")
     page(name: "soundsPage")
+    page(name: "soundEditPage")
     page(name: "speakersPage")
     page(name: "testPage")
     page(name: "guestPage")
+    page(name: "guestEditPage")
     page(name: "logPage")
     page(name: "settingsPage")
 }
@@ -202,19 +208,21 @@ String uiPill(String t, String kind = "info") { "<span class='rf-pill ${kind ?: 
 private void deleteControls(String kind, String id, String what) {
     String key = "${kind}_${id}".toString()
     if (state.confirmDel == key) {
-        paragraph warn("Delete this ${what}? " + (kind == "snd" ? "Profiles using it as a chime stop playing it." :
+        if (isDraft(kind, id)) paragraph warn("Delete this new ${what}? It was never saved, so nothing else changes.")
+        else paragraph warn("Delete this ${what}? " + (kind == "snd" ? "Profiles using it as a chime stop playing it." :
                        (kind == "gm" ? "Its switch (if Switchboard made it) is deleted too, and profiles, notifications and sirens forget it." :
                        "Its Switchboard device is deleted too; rules using it will need another device.")))
         input "btnDelYes_${key}", "button", title: "Yes, delete", width: 3
         input "btnDelNo", "button", title: "Cancel", width: 3
     } else {
-        input "btnDel_${key}", "button", title: "Delete this ${what}…"
+        input "btnDel_${key}", "button", title: "Delete", width: 3
     }
 }
 
 // ===================================================================== PAGES
 
 def mainPage() {
+    cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "mainPage", title: "", install: true, uninstall: true) {
         section {
@@ -275,172 +283,415 @@ private String queueStatus() {
     return s
 }
 
+// ------------------------------------------------------------------ Setup lists: one row per item, each item on its own edit page
+
+/** the five kinds of setup item: state key, id prefix, list page, edit page, words */
+@Field static final Map<String, Map> EDITS = [
+    prof: [stateKey: "profiles",  idp: "p", list: "profilesPage", edit: "profileEditPage", what: "profile",      listTitle: "Announcement Profiles"],
+    ntf : [stateKey: "notifiers", idp: "n", list: "notifyPage",   edit: "notifyEditPage",  what: "notification", listTitle: "Notifications"],
+    sir : [stateKey: "sirens",    idp: "r", list: "sirensPage",   edit: "sirenEditPage",   what: "siren",        listTitle: "Sirens"],
+    snd : [stateKey: "sounds",    idp: "s", list: "soundsPage",   edit: "soundEditPage",   what: "sound",        listTitle: "Sound files"],
+    gm  : [stateKey: "guests",    idp: "g", list: "guestPage",    edit: "guestEditPage",   what: "Guest Mode",   listTitle: "Guest Modes"]
+]
+
+/** the kind's state map, drafts included (runtime code uses ids() / soundIds() / guestIds(), which leave drafts out) */
+private Map rawMap(String kind) { (state[EDITS[kind].stateKey as String] ?: [:]) as Map }
+private boolean isDraft(String kind, String id) {
+    def v = id ? rawMap(kind)[id] : null
+    return v instanceof Map && v.draft == true
+}
+/** keys of an item map without drafts */
+private List liveKeys(Map m) { m.findAll { k, v -> !(v instanceof Map && v.draft == true) }.keySet() as List }
+private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? one : (many ?: one + 's')}".toString() }
+private void removeItemSettings(String kind, String id) {
+    String pre = "${kind}_${id}_".toString()
+    (settings.keySet().findAll { it.startsWith(pre) } as List).each { app.removeSetting(it as String) }
+}
+
+/** a new item: next real id, kept as a draft (no device, invisible to the runtime) until Save */
+private String newDraft(String kind) {
+    Map e = EDITS[kind]
+    Map m = rawMap(kind)
+    String counter = "next_${kind}".toString()
+    Integer next = (state[counter] ?: 1) as Integer
+    String id = "${e.idp}${next}".toString()
+    while (m.containsKey(id)) { next++; id = "${e.idp}${next}".toString() }
+    state[counter] = next + 1
+    removeItemSettings(kind, id)
+    m[id] = [name: "", draft: true]
+    state[e.stateKey as String] = m
+    if (kind == "gm" && !guestIds()) app.updateSetting("gm_${id}_name", [type: "text", value: "Guest Mode -SB"])
+    return id
+}
+private void discardDraft(String kind, String id) {
+    Map m = rawMap(kind)
+    if (!(m[id] instanceof Map && m[id].draft == true)) return
+    m.remove(id)
+    state[EDITS[kind].stateKey as String] = m
+    removeItemSettings(kind, id)
+}
+/** deletes every unsaved draft (and its settings) except the one being edited; every page but that edit page calls it */
+private void cleanDrafts(String keepKind = null, String keepId = null) {
+    EDITS.keySet().each { String kind ->
+        Map m = rawMap(kind)
+        List gone = m.findAll { k, v -> v instanceof Map && v.draft == true && !(kind == keepKind && k == keepId) }.collect { k, v -> k as String }
+        if (!gone) return
+        gone.each { String id -> m.remove(id); removeItemSettings(kind, id) }
+        state[EDITS[kind].stateKey as String] = m
+    }
+}
+
+/**
+ * The item an edit page shows. Opened by href with params [id: <id>] or [id: "new", n: <nonce>]; Hubitat drops params
+ * on submitOnChange redraws, so the id is kept in state.editId_<kind>. The nonce stops a redraw that does resend
+ * "new" from making a second draft. Returns null when the item is gone (deleted, discarded).
+ */
+private String editTarget(String kind, params) {
+    String key = "editId_${kind}".toString()
+    String pid = params?.id ? params.id.toString() : null
+    if (pid == "new") {
+        String nonce = (params?.n ?: "").toString()
+        String cur = state[key] as String
+        // same nonce = a redraw of the same "Add new" (even after Save or Delete): keep the item, never a second draft
+        if (!(cur && (state["editNonce_${kind}".toString()] as String) == nonce)) {
+            cur = newDraft(kind)
+            state["editNonce_${kind}".toString()] = nonce
+            state.remove("confirmDel"); state.remove("editSaved"); state.remove("editErr")
+        }
+        state[key] = cur
+    } else if (pid) {
+        if ((state[key] as String) != pid) { state.remove("confirmDel"); state.remove("editSaved"); state.remove("editErr") }
+        state[key] = pid
+    }
+    String id = state[key] as String
+    cleanDrafts(kind, id)
+    return id && rawMap(kind).containsKey(id) ? id : null
+}
+
+private String itemTitle(String kind, String id) {
+    KINDS[kind] ? itemName(kind, id) : (kind == "snd" ? soundName(id) : guestName(id))
+}
+/** top of an edit page: header, errors, "saved" / "gone" notes. Returns false when there is no item to show. */
+private boolean editHead(String kind, String id) {
+    Map e = EDITS[kind]
+    boolean draft = isDraft(kind, id)
+    section {
+        paragraph pageHead(!id ? (e.listTitle as String) : (draft ? "New ${e.what}" : itemTitle(kind, id)), "${APP_TITLE} · ${e.listTitle}")
+        if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
+        if (state.gmErr) { paragraph warn(state.gmErr as String); state.remove("gmErr") }
+        if (!id) {
+            paragraph state.editMsg ? uiOk(state.editMsg as String) : note("This ${e.what} isn't here any more (deleted, or new and never saved).")
+            state.remove("editMsg")
+            href name: "hrefBackTop_${kind}", page: e.list as String, title: "Back to ${e.listTitle}", description: ""
+        } else if (state.editSaved == "${kind}_${id}".toString()) {
+            paragraph uiOk("Saved")
+            href name: "hrefBackTop_${kind}", page: e.list as String, title: "Back to ${e.listTitle}", description: ""
+        } else if (draft) {
+            paragraph uiHint("New and not saved yet. Fill it in, then press <b>Save</b> at the bottom. " +
+                             "If you leave this page without saving, it is thrown away.")
+        }
+    }
+    return id != null
+}
+/** bottom of an edit page: Save (draft: create it; existing: back to the list) and two-step Delete */
+private void editFoot(String kind, String id) {
+    Map e = EDITS[kind]
+    String key = "${kind}_${id}".toString()
+    boolean draft = isDraft(kind, id)
+    section {
+        if (state.editErr) { paragraph warn(state.editErr as String); state.remove("editErr") }
+        if (state.editSaved == key) {
+            paragraph uiOk("Saved")
+            href name: "hrefBack_${kind}", page: e.list as String, title: "Back to ${e.listTitle}", description: ""
+            state.remove("editSaved")
+        } else {
+            paragraph note(draft ? "Press Save to create it. Leaving without saving throws it away." : "Changes are saved as you make them.")
+            input "btnSave_${key}", "button", title: "Save", width: 3
+        }
+        deleteControls(kind, id, e.what as String)
+    }
+}
+/** list page row: opens the item's edit page */
+private void editRow(String kind, String id, String title, String desc) {
+    href name: "hrefEdit_${kind}_${id}", page: EDITS[kind].edit as String, params: [id: id], title: title, description: desc
+}
+/** list page "Add new …": opens the edit page on a new draft */
+private void addRow(String kind) {
+    Map e = EDITS[kind]
+    section {
+        href name: "hrefAdd_${kind}", page: e.edit as String, params: [id: "new", n: now().toString()],
+             title: "Add new ${e.what}", description: "Opens a new ${e.what}. It is created when you press Save."
+    }
+}
+
+/** Save button. Draft: needs a name, then becomes real (device / switch created like before). Existing: relabel, then back to the list. */
+private void saveItem(String kind, String id) {
+    Map e = EDITS[kind]
+    Map m = rawMap(kind)
+    if (!m.containsKey(id)) return
+    if (isDraft(kind, id)) {
+        String n = cleanName(settings["${kind}_${id}_name"] as String)
+        if (!n) { state.editErr = "Enter a name first."; return }
+        String u = (settings["${kind}_${id}_url"] ?: "").toString().trim()
+        if (kind == "snd" && !u) { state.editErr = "Enter the sound's URL first."; return }
+        Map v = [name: n]
+        if (kind == "snd") v = [name: n, url: u, secs: soundSecs(id)]
+        m[id] = v
+        state[e.stateKey as String] = m
+        if (KINDS[kind]) ensureDevice(kind, id, n)
+        else if (kind == "gm") { ensureGuestSwitch(id); initGuests() }      // subscribes hub modes too, no Done needed
+        logInfo "Added ${e.what} '${n}'"
+    } else {
+        if (KINDS[kind]) syncNames()
+        else if (kind == "snd") syncSounds()
+        else { syncGuests(); ensureGuestSwitch(id); initGuests() }
+    }
+    state.editSaved = "${kind}_${id}".toString()
+}
+
 // ------------------------------------------------------------------ Announcement Profiles
 def profilesPage() {
+    cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "profilesPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Announcement Profiles", "${APP_TITLE} · Setup")
             paragraph uiHint("Each profile is one speaker device for your rules. Rules speak to <b>Announce – name</b>; " +
-                             "Switchboard plays it on the real speakers below, one message at a time.")
+                             "Switchboard plays it on the real speakers you pick, one message at a time.")
             if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
-            if (!ids("prof")) paragraph uiHint("No profiles yet. Add one below.")
-        }
-        ids("prof").each { String pid ->
-            String pre = "prof_${pid}_"
-            boolean urgent = settings[pre + "priority"] == "urgent"
-            int n = ((settings[pre + "spk"] ?: []) as List).size()
-            section("${uiTitle(null, itemName('prof', pid))}  ${n ? note("${n} speaker(s)") : uiPill('no speakers', 'warn')}" + (urgent ? " ${uiPill('URGENT', 'off')}" : ""), hideable: true, hidden: state.confirmDel != "prof_${pid}") {
-                input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
-                input pre + "priority", "enum", title: "How important?" + tip("Urgent messages jump the queue and interrupt normal ones; use for smoke, CO, water and alarms. Urgent messages never interrupt each other."),
-                      options: [normal: "Normal", urgent: "Urgent — interrupts other announcements"], defaultValue: "normal", submitOnChange: true, width: 6
-                input pre + "spk", "capability.speechSynthesis", title: "Which speakers?", multiple: true, required: false, submitOnChange: true
-                if (((settings[pre + "spk"] ?: []) as List).size() != realDevs(settings[pre + "spk"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real speakers.")
-                if (!n) paragraph warn("Pick at least one speaker, or messages to this profile go nowhere.")
-                input pre + "volMode", "enum", title: "How loud?" + tip("Day / night: uses the night window from Settings. Use the volume the rule sends: the volume in speak(text, volume), or the last setVolume a rule sent to this Switchboard device (it never changes the real speakers' volume by itself)."),
-                      submitOnChange: true, defaultValue: "daynight", width: 6,
-                      options: [daynight: "Day / night volume", fixed: "Fixed volume", caller: "Use the volume the rule sends"]
+            if (!ids("prof")) paragraph uiHint("No profiles yet.")
+            ids("prof").each { String pid ->
+                String pre = "prof_${pid}_"
+                int n = ((settings[pre + "spk"] ?: []) as List).size()
+                boolean urgent = settings[pre + "priority"] == "urgent"
                 String vm = settings[pre + "volMode"] ?: "daynight"
-                if (vm == "daynight") {
-                    input pre + "dayVol", "number", title: "Day volume", range: "0..100", defaultValue: 70, width: 3
-                    input pre + "nightVol", "number", title: "Night volume", range: "0..100", defaultValue: 40, width: 3
-                } else if (vm == "fixed") {
-                    input pre + "fixedVol", "number", title: "Volume", range: "0..100", defaultValue: 60, width: 3
-                }
-                Map snds = soundOptions()
-                if (snds) input pre + "chime", "enum", title: "Chime before each message (optional)" + tip("A short sound before every spoken message on this profile. Speakers that can't play files just speak."),
-                                options: snds, required: false, width: 6
-                input pre + "dedupeSec", "number", title: "Skip the same message if it was played in the last (seconds)" + tip("Stops a rule that fires twice from saying the same thing twice. 0 = never skip."),
-                      range: "0..3600", defaultValue: 15, width: 6
-                if (!urgent) {
-                    input pre + "staleSec", "number", title: "Skip if it waited longer than (seconds), 0 = never" +
-                          tip("A message can wait in line while others play. Skip it if it waited this long, so you don't hear 'Front door, opened' a minute late."),
-                          range: "0..3600", defaultValue: 30, width: 6
-                }
-                guestInputs("prof_${pid}", urgent)
-                input "btnTestProf_${pid}", "button", title: "Test this profile"
-                paragraph note("Used by: rules that send to the device <b>${esc(deviceLabel('prof', pid))}</b>.")
-                deleteControls("prof", pid, "profile")
+                String vol = vm == "fixed" ? "fixed volume ${intSet(pre + 'fixedVol', 60)}" :
+                             (vm == "caller" ? "volume from the rule" : "day ${intSet(pre + 'dayVol', 70)} / night ${intSet(pre + 'nightVol', 40)}")
+                editRow("prof", pid, esc(itemName("prof", pid)) + (n ? "" : " " + uiPill("no speakers", "warn")) + (urgent ? " " + uiPill("URGENT", "off") : ""),
+                        [plural(n, "speaker"), vol, urgent ? "urgent" : "normal"].join(" · "))
             }
         }
-        section(uiTitle(null, "Add a profile?")) {
-            input "newProfName", "text", title: "Name", required: false, submitOnChange: true, width: 6
-            input "btnAdd_prof", "button", title: "Add profile"
+        addRow("prof")
+    }
+}
+
+def profileEditPage(params = null) {
+    String pid = editTarget("prof", params)
+    dynamicPage(name: "profileEditPage", title: "", install: false, uninstall: false, nextPage: "profilesPage") {
+        if (!editHead("prof", pid)) return
+        boolean draft = isDraft("prof", pid)
+        String pre = "prof_${pid}_"
+        boolean urgent = settings[pre + "priority"] == "urgent"
+        int n = ((settings[pre + "spk"] ?: []) as List).size()
+        section(uiTitle(null, "Profile")) {
+            input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
+            input pre + "priority", "enum", title: "How important?" + tip("Urgent messages jump the queue and interrupt normal ones; use for smoke, CO, water and alarms. Urgent messages never interrupt each other."),
+                  options: [normal: "Normal", urgent: "Urgent — interrupts other announcements"], defaultValue: "normal", submitOnChange: true, width: 6
         }
+        section(uiTitle(null, "Speakers and volume")) {
+            input pre + "spk", "capability.speechSynthesis", title: "Which speakers?", multiple: true, required: false, submitOnChange: true
+            if (((settings[pre + "spk"] ?: []) as List).size() != realDevs(settings[pre + "spk"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real speakers.")
+            if (!n) paragraph warn("Pick at least one speaker, or messages to this profile go nowhere.")
+            input pre + "volMode", "enum", title: "How loud?" + tip("Day / night: uses the night window from Settings. Use the volume the rule sends: the volume in speak(text, volume), or the last setVolume a rule sent to this Switchboard device (it never changes the real speakers' volume by itself)."),
+                  submitOnChange: true, defaultValue: "daynight", width: 6,
+                  options: [daynight: "Day / night volume", fixed: "Fixed volume", caller: "Use the volume the rule sends"]
+            String vm = settings[pre + "volMode"] ?: "daynight"
+            if (vm == "daynight") {
+                input pre + "dayVol", "number", title: "Day volume", range: "0..100", defaultValue: 70, width: 3
+                input pre + "nightVol", "number", title: "Night volume", range: "0..100", defaultValue: 40, width: 3
+            } else if (vm == "fixed") {
+                input pre + "fixedVol", "number", title: "Volume", range: "0..100", defaultValue: 60, width: 3
+            }
+            Map snds = soundOptions()
+            if (snds) input pre + "chime", "enum", title: "Chime before each message (optional)" + tip("A short sound before every spoken message on this profile. Speakers that can't play files just speak."),
+                            options: snds, required: false, width: 6
+        }
+        section(uiTitle(null, "Skipping")) {
+            input pre + "dedupeSec", "number", title: "Skip the same message if it was played in the last (seconds)" + tip("Stops a rule that fires twice from saying the same thing twice. 0 = never skip."),
+                  range: "0..3600", defaultValue: 15, width: 6
+            if (!urgent) {
+                input pre + "staleSec", "number", title: "Skip if it waited longer than (seconds), 0 = never" +
+                      tip("A message can wait in line while others play. Skip it if it waited this long, so you don't hear 'Front door, opened' a minute late."),
+                      range: "0..3600", defaultValue: 30, width: 6
+            }
+        }
+        section(uiTitle(null, "Guest Modes")) {
+            guestInputs("prof_${pid}", urgent)
+        }
+        section(uiTitle(null, "Test")) {
+            if (draft) {
+                paragraph note("Save it first, then test it. Its device <b>Announce – name</b> is created when you press Save.")
+            } else {
+                input "btnTestProf_${pid}", "button", title: "Test this profile"
+                paragraph note("Used by: rules that send to the device <b>${esc(deviceLabel('prof', pid))}</b>.")
+            }
+        }
+        editFoot("prof", pid)
     }
 }
 
 // ------------------------------------------------------------------ Notifications
 def notifyPage() {
+    cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "notifyPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Notifications", "${APP_TITLE} · Setup")
             paragraph uiHint("Rules send to <b>Notify – name</b>; Switchboard forwards to the phones you pick.")
             if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
-            if (!ids("ntf")) paragraph uiHint("None yet. Add one below.")
-        }
-        ids("ntf").each { String nid ->
-            String pre = "ntf_${nid}_"
-            int n = ((settings[pre + "devs"] ?: []) as List).size()
-            section("${uiTitle(null, itemName('ntf', nid))}  ${n ? note("${n} device(s)") : uiPill('no devices', 'warn')}", hideable: true, hidden: state.confirmDel != "ntf_${nid}") {
-                input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
-                input pre + "devs", "capability.notification", title: "Send to" + tip("Hubitat app phones, Pushover, email or SMS drivers."),
-                      multiple: true, required: false, submitOnChange: true
-                if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real phones or notification devices.")
-                if (!n) paragraph warn("Pick at least one device.")
-                input pre + "when", "enum", title: "When", defaultValue: "always", width: 6,
-                      options: [always: "Always", away: "Only when nobody is home"]
-                if (settings[pre + "when"] == "away" && !homeSensors) paragraph warn("Pick who is home in Settings, or this always sends.")
-                input pre + "dedupeSec", "number", title: "Skip the same message if it was sent in the last (seconds)", range: "0..3600", defaultValue: 15, width: 6
-                guestInputs("ntf_${nid}", false)
-                input pre + "prefix", "text", title: "Text added before each message (optional)", required: false, width: 6
-                input pre + "pushover", "bool", title: "Mark as high priority (Pushover [H])" + tip("Adds [H] in front of the message on Pushover devices only."), defaultValue: false
-                input "btnTestNtf_${nid}", "button", title: "Send a test"
-                paragraph note("Used by: rules that send to the device <b>${esc(deviceLabel('ntf', nid))}</b>.")
-                deleteControls("ntf", nid, "notification device")
+            if (!ids("ntf")) paragraph uiHint("None yet.")
+            ids("ntf").each { String nid ->
+                String pre = "ntf_${nid}_"
+                int n = ((settings[pre + "devs"] ?: []) as List).size()
+                editRow("ntf", nid, esc(itemName("ntf", nid)) + (n ? "" : " " + uiPill("no devices", "warn")),
+                        [plural(n, "device"), settings[pre + "when"] == "away" ? "only when nobody is home" : "always"].join(" · "))
             }
         }
-        section(uiTitle(null, "Add one?")) {
-            input "newNtfName", "text", title: "Name", required: false, submitOnChange: true, width: 6
-            input "btnAdd_ntf", "button", title: "Add"
+        addRow("ntf")
+    }
+}
+
+def notifyEditPage(params = null) {
+    String nid = editTarget("ntf", params)
+    dynamicPage(name: "notifyEditPage", title: "", install: false, uninstall: false, nextPage: "notifyPage") {
+        if (!editHead("ntf", nid)) return
+        boolean draft = isDraft("ntf", nid)
+        String pre = "ntf_${nid}_"
+        int n = ((settings[pre + "devs"] ?: []) as List).size()
+        section(uiTitle(null, "Notification")) {
+            input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
+            input pre + "devs", "capability.notification", title: "Send to" + tip("Hubitat app phones, Pushover, email or SMS drivers."),
+                  multiple: true, required: false, submitOnChange: true
+            if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real phones or notification devices.")
+            if (!n) paragraph warn("Pick at least one device.")
+            input pre + "when", "enum", title: "When", defaultValue: "always", width: 6,
+                  options: [always: "Always", away: "Only when nobody is home"]
+            if (settings[pre + "when"] == "away" && !homeSensors) paragraph warn("Pick who is home in Settings, or this always sends.")
+            input pre + "dedupeSec", "number", title: "Skip the same message if it was sent in the last (seconds)", range: "0..3600", defaultValue: 15, width: 6
+            input pre + "prefix", "text", title: "Text added before each message (optional)", required: false, width: 6
+            input pre + "pushover", "bool", title: "Mark as high priority (Pushover [H])" + tip("Adds [H] in front of the message on Pushover devices only."), defaultValue: false
         }
+        section(uiTitle(null, "Guest Modes")) {
+            guestInputs("ntf_${nid}", false)
+        }
+        section(uiTitle(null, "Test")) {
+            if (draft) {
+                paragraph note("Save it first, then send a test. Its device <b>Notify – name</b> is created when you press Save.")
+            } else {
+                input "btnTestNtf_${nid}", "button", title: "Send a test"
+                paragraph note("Used by: rules that send to the device <b>${esc(deviceLabel('ntf', nid))}</b>.")
+            }
+        }
+        editFoot("ntf", nid)
     }
 }
 
 // ------------------------------------------------------------------ Sirens
 def sirensPage() {
+    cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "sirensPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Sirens", "${APP_TITLE} · Setup")
             paragraph uiHint("Rules (and HSM) use <b>Siren – name</b>; Switchboard sounds the real sirens, except in Test Mode.")
             if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
-            if (!ids("sir")) paragraph uiHint("None yet. Add one below.")
-        }
-        ids("sir").each { String rid ->
-            String pre = "sir_${rid}_"
-            int n = ((settings[pre + "devs"] ?: []) as List).size()
-            boolean on = (atomicState.sirenOffAt ?: [:]).containsKey(rid)
-            section("${uiTitle(null, itemName('sir', rid))}  ${n ? note("${n} siren(s)") : uiPill('no sirens', 'warn')}" + (on ? " " + uiPill("SOUNDING", "off") : ""), hideable: true, hidden: !on && state.confirmDel != "sir_${rid}") {
-                input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
-                input pre + "devs", "capability.alarm", title: "Real sirens" + tip("Some devices claim to be an alarm but aren't sirens (e.g. some power monitors). Pick only real sirens and strobes."),
-                      multiple: true, required: false, submitOnChange: true
-                if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real sirens.")
-                input pre + "maxMin", "number", title: "Stop after (minutes)" + tip("Sirens are turned off after this long even if no rule turns them off. 0 = never."),
-                      range: "0..60", defaultValue: 5, width: 6
-                guestInputs("sir_${rid}", false)
-                input "btnSirOff_${rid}", "button", title: "Turn these sirens off now"
-                paragraph note("Used by: rules that use the device <b>${esc(deviceLabel('sir', rid))}</b>.")
-                deleteControls("sir", rid, "siren device")
+            if (!ids("sir")) paragraph uiHint("None yet.")
+            ids("sir").each { String rid ->
+                String pre = "sir_${rid}_"
+                int n = ((settings[pre + "devs"] ?: []) as List).size()
+                boolean on = (atomicState.sirenOffAt ?: [:]).containsKey(rid)
+                Integer mx = intSet(pre + "maxMin", 5)
+                editRow("sir", rid, esc(itemName("sir", rid)) + (n ? "" : " " + uiPill("no sirens", "warn")) + (on ? " " + uiPill("SOUNDING", "off") : ""),
+                        [plural(n, "siren"), mx > 0 ? "stop after ${mx} min" : "never stops by itself"].join(" · "))
             }
         }
-        section(uiTitle(null, "Add one?")) {
-            input "newSirName", "text", title: "Name", required: false, submitOnChange: true, width: 6
-            input "btnAdd_sir", "button", title: "Add"
+        addRow("sir")
+    }
+}
+
+def sirenEditPage(params = null) {
+    String rid = editTarget("sir", params)
+    dynamicPage(name: "sirenEditPage", title: "", install: false, uninstall: false, nextPage: "sirensPage") {
+        if (!editHead("sir", rid)) return
+        boolean draft = isDraft("sir", rid)
+        String pre = "sir_${rid}_"
+        boolean on = !draft && (atomicState.sirenOffAt ?: [:]).containsKey(rid)
+        section(uiTitle(null, "Siren")) {
+            if (on) paragraph uiPill("SOUNDING", "off")
+            input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
+            input pre + "devs", "capability.alarm", title: "Real sirens" + tip("Some devices claim to be an alarm but aren't sirens (e.g. some power monitors). Pick only real sirens and strobes."),
+                  multiple: true, required: false, submitOnChange: true
+            if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real sirens.")
+            input pre + "maxMin", "number", title: "Stop after (minutes)" + tip("Sirens are turned off after this long even if no rule turns them off. 0 = never."),
+                  range: "0..60", defaultValue: 5, width: 6
         }
+        section(uiTitle(null, "Guest Modes")) {
+            guestInputs("sir_${rid}", false)
+        }
+        section {
+            if (draft) {
+                paragraph note("Its device <b>Siren – name</b> is created when you press Save.")
+            } else {
+                input "btnSirOff_${rid}", "button", title: "Turn these sirens off now"
+                paragraph note("Used by: rules that use the device <b>${esc(deviceLabel('sir', rid))}</b>.")
+            }
+        }
+        editFoot("sir", rid)
     }
 }
 
 // ------------------------------------------------------------------ Sound files
 def soundsPage() {
+    cleanDrafts(); state.remove("confirmDel")
     syncSounds()
     dynamicPage(name: "soundsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Sound files", "${APP_TITLE} · Setup")
             paragraph uiHint("Named sounds that profiles play as a chime, and rules play with <b>playSound(name)</b>.") + tip(SND_URL_TIP)
             if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
-            if (!soundIds()) paragraph uiHint("No sounds yet. Add one below.")
+            if (!soundIds()) paragraph uiHint("No sounds yet.")
+            soundIds().each { String sid ->
+                String u = soundUrl(sid)
+                String file = u ? u.replaceAll(/[?#].*$/, "").tokenize("/").with { it ? it.last() : u } : "no URL yet"
+                editRow("snd", sid, esc(soundName(sid)) + (u ? "" : " " + uiPill("no URL", "warn")), "${file} · ${soundSecs(sid)} s")
+            }
         }
-        if (soundIds()) section(uiTitle(null, "Where should tests play?")) {
-            input "sndTestSpk", "enum", title: "Speaker", options: speakerOptions(), required: false, submitOnChange: true, width: 6
-            if (!speakerOptions()) paragraph note("Pick speakers in an Announcement Profile first.")
+        addRow("snd")
+    }
+}
+
+def soundEditPage(params = null) {
+    String sid = editTarget("snd", params)
+    dynamicPage(name: "soundEditPage", title: "", install: false, uninstall: false, nextPage: "soundsPage") {
+        if (!editHead("snd", sid)) return
+        boolean draft = isDraft("snd", sid)
+        String pre = "snd_${sid}_"
+        String url = draft ? (settings[pre + "url"] ?: "").toString().trim() : (soundUrl(sid) ?: "")
+        section(uiTitle(null, "Sound")) {
+            input pre + "name", "text", title: "Name", submitOnChange: true, width: 4
+            input pre + "url", "text", title: "URL" + tip(SND_URL_TIP), submitOnChange: true, width: 6
+            input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays. The next message waits this long."),
+                  range: "1..3600", defaultValue: 5, submitOnChange: true, width: 2
+            if (!url) paragraph warn(draft ? "Enter a URL." : "Enter a URL, or this sound is skipped.")
         }
-        soundIds().each { String sid ->
-            String pre = "snd_${sid}_"
-            section("${uiTitle(null, soundName(sid))}  ${soundUrl(sid) ? note("${soundSecs(sid)} s") : uiPill('no URL', 'warn')}", hideable: true, hidden: state.confirmDel != "snd_${sid}") {
-                input pre + "name", "text", title: "Name", submitOnChange: true, width: 4
-                input pre + "url", "text", title: "URL" + tip(SND_URL_TIP), submitOnChange: true, width: 6
-                input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays. The next message waits this long."),
-                      range: "1..3600", defaultValue: 5, submitOnChange: true, width: 2
-                if (!soundUrl(sid)) paragraph warn("Enter a URL, or this sound is skipped.")
+        section(uiTitle(null, "Test")) {
+            if (draft) {
+                paragraph note("Save it first, then play it.")
+            } else {
+                input "sndTestSpk", "enum", title: "Play tests on", options: speakerOptions(), required: false, submitOnChange: true, width: 6
+                if (!speakerOptions()) paragraph note("Pick speakers in an Announcement Profile first.")
                 if (settings.sndTestSpk) input "btnTestSnd_${sid}", "button", title: "Play it"
                 List users = ids("prof").findAll { settings["prof_${it}_chime"] == sid }.collect { itemName("prof", it) }
                 paragraph users ? note("Chime for: ${users.join(', ')}") : note("Not used as a chime.")
-                deleteControls("snd", sid, "sound")
             }
         }
-        section(uiTitle(null, "Add a sound?")) {
-            input "newSndName", "text", title: "Name", required: false, submitOnChange: true, width: 4
-            input "newSndUrl", "text", title: "URL" + tip(SND_URL_TIP), required: false, submitOnChange: true, width: 6
-            input "newSndSecs", "number", title: "Length (seconds)", defaultValue: 5, range: "1..3600", required: false, submitOnChange: true, width: 2
-            input "btnAddSound", "button", title: "Add sound"
-        }
+        editFoot("snd", sid)
     }
 }
 
 // ------------------------------------------------------------------ Speakers & queue
 def speakersPage() {
+    cleanDrafts()
     dynamicPage(name: "speakersPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Speakers & queue", "${APP_TITLE} · Setup")
@@ -476,6 +727,7 @@ def speakersPage() {
 
 // ------------------------------------------------------------------ Test Mode
 def testPage() {
+    cleanDrafts()
     dynamicPage(name: "testPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Test Mode", "${APP_TITLE}")
@@ -509,8 +761,10 @@ def testPage() {
     }
 }
 
+
 // ------------------------------------------------------------------ Guest Mode
 def guestPage() {
+    cleanDrafts(); state.remove("confirmDel")
     syncGuests()
     dynamicPage(name: "guestPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -519,57 +773,83 @@ def guestPage() {
                              "Each profile, notification and siren picks which ones make it play, which make it stay silent, and what it does the rest of the time. Play always wins.") +
                       tip("Several Guest Modes can be on at once. Each has its own switch that dashboards, webCoRE and Rule Machine can turn on and off.")
             if (state.gmErr) { paragraph warn(state.gmErr as String); state.remove("gmErr") }
-            if (!guestIds()) paragraph uiHint("No Guest Modes yet. Add one below.")
+            if (!guestIds()) paragraph uiHint("No Guest Modes yet.")
+            guestIds().each { String gid ->
+                boolean on = isGuestOn(gid)
+                Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
+                String src = gmSrc(gid)
+                String how = src == "create" ? "own switch" :
+                             (src == "existing" ? "switch: ${settings["gm_${gid}_switch"]?.displayName ?: 'none picked'}" :
+                              "hub modes: ${((settings["gm_${gid}_modes"] ?: []) as List).join(', ') ?: 'none picked'}")
+                editRow("gm", gid, esc(guestName(gid)) + " " + (on ? uiPill("ON", "info") : uiPill("off", "off")),
+                        [on ? "ON" + (end ? " until ${fmtTime(end)}" : "") : "off", how].join(" · "))
+            }
         }
-        guestIds().each { String gid ->
-            String pre = "gm_${gid}_"
-            boolean on = isGuestOn(gid)
-            Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
-            String src = gmSrc(gid)
-            section("${uiTitle(null, guestName(gid))}  " + (on ? uiPill("ON", "info") + (end ? " " + note("until ${fmtTime(end)}") : "") : uiPill("off", "off")), hideable: true, hidden: !on && state.confirmDel != "gm_${gid}") {
+        addRow("gm")
+    }
+}
+
+def guestEditPage(params = null) {
+    String gid = editTarget("gm", params)
+    syncGuests()
+    dynamicPage(name: "guestEditPage", title: "", install: false, uninstall: false, nextPage: "guestPage") {
+        if (!editHead("gm", gid)) return
+        boolean draft = isDraft("gm", gid)
+        String pre = "gm_${gid}_"
+        boolean on = isGuestOn(gid)
+        Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
+        String src = gmSrc(gid)
+        section(uiTitle(null, "Guest Mode")) {
+            if (!draft) {
+                paragraph on ? uiPill("ON", "info") + (end ? " " + note("until ${fmtTime(end)}") : "") : uiPill("off", "off")
                 if (src != "modes") {
                     if (on) input "btnGmOff_${gid}", "button", title: "Turn off", width: 3
                     else input "btnGmOn_${gid}", "button", title: "Turn on", width: 3
                 }
-                input pre + "name", "text", title: "Name" + tip("Renaming also renames its switch."), submitOnChange: true, width: 6
-                input pre + "source", "enum", title: "Turned on by", submitOnChange: true, defaultValue: "create", width: 6,
-                      options: [create: "Its own switch (recommended)", existing: "A switch I already have", modes: "Hub mode(s)"]
-                if (src == "create") {
-                    paragraph note("Switch: <b>${esc(guestName(gid))}</b>" + (getChildDevice(gmDni(gid)) ? "" : " (created when you press Done)"))
-                } else if (src == "existing") {
-                    input pre + "switch", "capability.switch", title: "Switch", required: false, width: 6
-                    if (!settings[pre + "switch"]) paragraph warn("Pick a switch, or this Guest Mode can't turn on.")
-                } else {
-                    input pre + "modes", "mode", title: "On while the hub is in", multiple: true, required: false, width: 6
-                    paragraph note("Your mode rules turn it on and off; Switchboard can't.")
-                }
-                if (src != "modes") {
-                    input pre + "endDate", "date", title: "Guests leave on", required: false, submitOnChange: true, width: 4
-                    input pre + "endTime", "time", title: "at", required: false, submitOnChange: true, width: 4
-                    if (settings[pre + "endDate"] && settings[pre + "endTime"]) input "btnGmUntil_${gid}", "button", title: "On until then", width: 4
-                    input pre + "defaultHours", "number", title: "If turned on another way (dashboard, rule), turn off after (hours)" +
-                          tip("0 = stay on until something turns it off."), defaultValue: 24, range: "0..720", width: 6
-                }
-                input pre + "remindTime", "time", title: "Daily reminder at (blank = none)", required: false, width: 4
-                input pre + "remindDevs", "capability.notification", title: "Remind", multiple: true, required: false, width: 8
+            }
+            input pre + "name", "text", title: "Name" + tip("Renaming also renames its switch."), submitOnChange: true, width: 6,
+                  defaultValue: (draft && !guestIds()) ? "Guest Mode -SB" : null
+            input pre + "source", "enum", title: "Turned on by", submitOnChange: true, defaultValue: "create", width: 6,
+                  options: [create: "Its own switch (recommended)", existing: "A switch I already have", modes: "Hub mode(s)"]
+            if (src == "create") {
+                paragraph note("Switch: <b>${esc(draft && !cleanName(settings[pre + 'name'] as String) ? '(the name above)' : guestName(gid))}</b>" +(getChildDevice(gmDni(gid)) ? "" : " (created when you press Save)"))
+            } else if (src == "existing") {
+                input pre + "switch", "capability.switch", title: "Switch", required: false, width: 6
+                if (!settings[pre + "switch"]) paragraph warn("Pick a switch, or this Guest Mode can't turn on.")
+            } else {
+                input pre + "modes", "mode", title: "On while the hub is in", multiple: true, required: false, width: 6
+                paragraph note("Your mode rules turn it on and off; Switchboard can't.")
+            }
+        }
+        section(uiTitle(null, "When it ends")) {
+            if (src != "modes") {
+                input pre + "endDate", "date", title: "Guests leave on", required: false, submitOnChange: true, width: 4
+                input pre + "endTime", "time", title: "at", required: false, submitOnChange: true, width: 4
+                if (!draft && settings[pre + "endDate"] && settings[pre + "endTime"]) input "btnGmUntil_${gid}", "button", title: "On until then", width: 4
+                input pre + "defaultHours", "number", title: "If turned on another way (dashboard, rule), turn off after (hours)" +
+                      tip("0 = stay on until something turns it off."), defaultValue: 24, range: "0..720", width: 6
+            }
+            input pre + "remindTime", "time", title: "Daily reminder at (blank = none)", required: false, width: 4
+            input pre + "remindDevs", "capability.notification", title: "Remind", multiple: true, required: false, width: 8
+        }
+        section {
+            if (draft) {
+                paragraph note("Once saved, profiles, notifications and sirens can pick it.")
+            } else {
                 List users = []
                 KINDS.keySet().each { String kind -> ids(kind).each { String id ->
                     String p = "${kind}_${id}"
                     if (((settings["${p}_guestQuiet"] ?: []) as List).contains(gid) || ((settings["${p}_guestPlay"] ?: []) as List).contains(gid)) users << deviceLabel(kind, id)
                 } }
                 paragraph users ? note("Used by: ${users.join(', ')}") : note("Not used by any profile, notification or siren yet.")
-                deleteControls("gm", gid, "Guest Mode")
             }
         }
-        section(uiTitle(null, "Add a Guest Mode?")) {
-            input "newGuestName", "text", title: "Name", required: false, submitOnChange: true, width: 6, defaultValue: guestIds() ? null : "Guest Mode -SB"
-            input "btnAddGuest", "button", title: "Add Guest Mode"
-            paragraph note("Its switch is created right away.")
-        }
+        editFoot("gm", gid)
     }
 }
 // ------------------------------------------------------------------ Message log
 def logPage() {
+    cleanDrafts()
     dynamicPage(name: "logPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         List all = logEntries()
         section {
@@ -660,6 +940,7 @@ private String logTable(List rows) {
 
 // ------------------------------------------------------------------ Settings
 def settingsPage() {
+    cleanDrafts()
     dynamicPage(name: "settingsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Settings", "${APP_TITLE} · Setup")
@@ -696,28 +977,33 @@ def settingsPage() {
 
 void appButtonHandler(String btn) {
     switch (btn) {
-        case "btnAdd_prof": addItem("prof", newProfName as String); app.removeSetting("newProfName"); return
-        case "btnAdd_ntf":  addItem("ntf", newNtfName as String);   app.removeSetting("newNtfName");  return
-        case "btnAdd_sir":  addItem("sir", newSirName as String);   app.removeSetting("newSirName");  return
-        case "btnAddSound": addSound(); return
         case "btnDelNo":    state.remove("confirmDel"); return
         case "btnClearQ":   clearQueue(); return
         case "btnClearLog": withStateLock { atomicState.log = [] }; return
         case "btnLogReset": ["logDev", "logOutcome", "logFrom", "logWhen", "logFromDate", "logFromTime", "logToDate", "logToTime"].each { app.removeSetting(it) }; return
         case "btnTmOn":     turnTestModeOn(); return
         case "btnTmOff":    turnTestModeOff("Test Mode is OFF. Announcements, notifications and sirens are back to normal."); return
-        case "btnAddGuest": addGuest(); return
     }
     if (btn.startsWith("btnGmOn_"))    { guestOn(btn - "btnGmOn_", false); return }
     if (btn.startsWith("btnGmUntil_")) { guestOn(btn - "btnGmUntil_", true); return }
     if (btn.startsWith("btnGmOff_"))   { guestOff(btn - "btnGmOff_"); return }
+    if (btn.startsWith("btnSave_")) {
+        List p = (btn - "btnSave_").split("_", 2) as List
+        if (p.size() == 2 && EDITS[p[0]]) saveItem(p[0] as String, p[1] as String)
+        return
+    }
     if (btn.startsWith("btnDelYes_")) {
         List p = (btn - "btnDelYes_").split("_", 2) as List
         state.remove("confirmDel")
-        if (p.size() == 2) {
-            if (p[0] == "snd") deleteSound(p[1] as String)
-            else if (p[0] == "gm") deleteGuest(p[1] as String)
-            else deleteItem(p[0] as String, p[1] as String)
+        if (p.size() == 2 && EDITS[p[0]]) {
+            String kind = p[0] as String, id = p[1] as String
+            if (isDraft(kind, id)) { discardDraft(kind, id); state.editMsg = "Deleted. It was never saved." }
+            else {
+                if (kind == "snd") deleteSound(id)
+                else if (kind == "gm") deleteGuest(id)
+                else deleteItem(kind, id)
+                if (!rawMap(kind).containsKey(id)) state.editMsg = "Deleted."
+            }
         }
         return
     }
@@ -752,9 +1038,10 @@ void appButtonHandler(String btn) {
 // ===================================================================== VIRTUAL DEVICES (profiles, notifiers, sirens)
 
 private Map itemMap(String kind) { (state[KINDS[kind].stateKey as String] ?: [:]) as Map }
+/** saved items only: drafts never reach the runtime */
 List<String> ids(String kind) {
     Map m = itemMap(kind)
-    return m.keySet().sort { a, b -> itemName(kind, a as String).toLowerCase() <=> itemName(kind, b as String).toLowerCase() } as List
+    return liveKeys(m).sort { a, b -> itemName(kind, a as String).toLowerCase() <=> itemName(kind, b as String).toLowerCase() } as List
 }
 String itemName(String kind, String id) {
     cleanName(settings["${kind}_${id}_name"] as String) ?: (itemMap(kind)[id]?.name ?: id) as String
@@ -766,24 +1053,8 @@ private Map parseDni(String dni) {
     List p = (dni ?: "").split("-") as List
     if (p.size() != 4 || p[0] != "SB" || p[1] != app.id.toString()) return null
     String kind = KINDS.find { k, v -> v.dev == p[2] }?.key
-    if (!kind || !itemMap(kind).containsKey(p[3])) return null
+    if (!kind || !itemMap(kind).containsKey(p[3]) || isDraft(kind, p[3] as String)) return null
     return [kind: kind, id: p[3]]
-}
-
-private void addItem(String kind, String rawName) {
-    String n = cleanName(rawName)
-    if (!n) { state.pageErr = "Enter a name first."; return }
-    Map m = itemMap(kind)
-    String counter = "next_${kind}".toString()
-    Integer next = (state[counter] ?: 1) as Integer
-    String id = "${KINDS[kind].idp}${next}".toString()
-    while (m.containsKey(id)) { next++; id = "${KINDS[kind].idp}${next}".toString() }
-    state[counter] = next + 1
-    m[id] = [name: n]
-    state[KINDS[kind].stateKey as String] = m
-    app.updateSetting("${kind}_${id}_name", [type: "text", value: n])
-    ensureDevice(kind, id, n)
-    logInfo "Added ${KINDS[kind].what} '${n}'"
 }
 
 /** creates the item's virtual device if missing; returns it */
@@ -836,7 +1107,7 @@ private void syncNames() {
     }
 }
 private void ensureChildren() {
-    KINDS.keySet().each { String kind -> itemMap(kind).keySet().each { String id -> ensureDevice(kind, id) } }
+    KINDS.keySet().each { String kind -> ids(kind).each { String id -> ensureDevice(kind, id) } }
 }
 
 private void childEvent(def child, String name, def value) {
@@ -848,25 +1119,7 @@ private void childEvent(def child, String name, def value) {
 
 List<String> soundIds() {
     Map m = state.sounds ?: [:]
-    return m.keySet().sort { a, b -> soundName(a as String).toLowerCase() <=> soundName(b as String).toLowerCase() } as List
-}
-private void addSound() {
-    String n = cleanName(newSndName as String)
-    String u = (newSndUrl ?: "").toString().trim()
-    if (!n || !u) { state.pageErr = "Enter a name and a URL."; return }
-    Map m = state.sounds ?: [:]
-    Integer next = (state.next_snd ?: 1) as Integer
-    String sid = "s${next}"
-    while (m.containsKey(sid)) { next++; sid = "s${next}" }
-    state.next_snd = next + 1
-    Integer secs = newSndSecs ? Math.max(1, newSndSecs as Integer) : 5
-    m[sid] = [name: n, url: u, secs: secs]
-    state.sounds = m
-    app.updateSetting("snd_${sid}_name", [type: "text", value: n])
-    app.updateSetting("snd_${sid}_url", [type: "text", value: u])
-    app.updateSetting("snd_${sid}_secs", [type: "number", value: secs])
-    ["newSndName", "newSndUrl", "newSndSecs"].each { app.removeSetting(it) }
-    logInfo "Added sound '${n}'"
+    return liveKeys(m).sort { a, b -> soundName(a as String).toLowerCase() <=> soundName(b as String).toLowerCase() } as List
 }
 private void deleteSound(String sid) {
     Map m = state.sounds ?: [:]
@@ -884,7 +1137,7 @@ private void syncSounds() {
     state.sounds = m
 }
 String soundUrl(String sid) {
-    if (!sid || !state.sounds?.get(sid)) return null
+    if (!sid || !state.sounds?.get(sid) || isDraft("snd", sid)) return null
     String u = (settings["snd_${sid}_url"] != null ? settings["snd_${sid}_url"] : state.sounds[sid].url) as String
     return u?.trim() ?: null
 }
@@ -1426,7 +1679,7 @@ void testModeReminder() {
 
 List<String> guestIds() {
     Map g = (state.guests ?: [:]) as Map
-    return g.keySet().sort { a, b -> guestName(a as String).toLowerCase() <=> guestName(b as String).toLowerCase() } as List
+    return liveKeys(g).sort { a, b -> guestName(a as String).toLowerCase() <=> guestName(b as String).toLowerCase() } as List
 }
 String guestName(String gid) {
     cleanName(settings["gm_${gid}_name"] as String) ?: ((state.guests ?: [:])[gid]?.name ?: "(deleted Guest Mode)") as String
@@ -1441,7 +1694,7 @@ def gmDevice(String gid) {
     return s == "create" ? getChildDevice(gmDni(gid)) : (s == "existing" ? settings["gm_${gid}_switch"] : null)
 }
 Boolean isGuestOn(String gid) {
-    if (!(state.guests ?: [:]).containsKey(gid)) return false
+    if (!(state.guests ?: [:]).containsKey(gid) || isDraft("gm", gid)) return false
     if (gmSrc(gid) == "modes") {
         List m = (settings["gm_${gid}_modes"] ?: []) as List
         return m ? (location.mode in m) : false
@@ -1458,7 +1711,7 @@ Boolean isGuestMode() { guestsOn().size() > 0 }
  * Returns the log outcome when skipped, or null.
  */
 private String guestSkip(String prefix) {
-    Map g = (state.guests ?: [:]) as Map
+    Map g = ((state.guests ?: [:]) as Map).findAll { k, v -> !(v instanceof Map && v.draft == true) }
     if (!g) return null
     List play  = ((settings["${prefix}_guestPlay"] ?: []) as List).findAll { g.containsKey(it) }
     List quiet = ((settings["${prefix}_guestQuiet"] ?: []) as List).findAll { g.containsKey(it) && !play.contains(it) }
@@ -1484,23 +1737,6 @@ private void guestInputs(String prefix, boolean urgent) {
     if (urgent && (settings["${prefix}_guestQuiet"] || settings["${prefix}_guestOther"] == "silent")) paragraph warn("Safety alerts should keep playing during Guest Mode.")
 }
 
-private void addGuest() {
-    String n = cleanName(newGuestName as String)
-    if (!n && !guestIds()) n = "Guest Mode -SB"
-    if (!n) { state.gmErr = "Enter a name first."; return }
-    Map g = (state.guests ?: [:]) as Map
-    Integer next = (state.next_gm ?: 1) as Integer
-    String gid = "g${next}"
-    while (g.containsKey(gid)) { next++; gid = "g${next}" }
-    state.next_gm = next + 1
-    g[gid] = [name: n]
-    state.guests = g
-    app.updateSetting("gm_${gid}_name", [type: "text", value: n])
-    app.removeSetting("newGuestName")
-    ensureGuestSwitch(gid)
-    initGuest(gid)
-    logInfo "Added Guest Mode '${n}'"
-}
 private void deleteGuest(String gid) {
     Map g = (state.guests ?: [:]) as Map
     if (!g.containsKey(gid)) return
@@ -2129,6 +2365,7 @@ void updated() {
 void initialize() {
     unsubscribe()
     unschedule()
+    cleanDrafts()
     ensureGuestSwitches()
     ensureChildren()
 

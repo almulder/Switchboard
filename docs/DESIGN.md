@@ -67,6 +67,26 @@ links: **Announcement Profiles**, **Notifications**, **Sirens**, **Sound files**
 **Test Mode**, **Guest Mode**, **Message log**, **Settings**. Reuse Rule Forge's UI kit (`uiCss`, `uiHeader`, ⓘ tips
 via fixed-position CSS tooltip, pills). Plain short wording, detail in tips.
 
+### Setup lists and edit pages (Announcement Profiles, Notifications, Sirens, Sound files, Guest Modes)
+Each kind has a **list page** (`profilesPage`, `notifyPage`, `sirensPage`, `soundsPage`, `guestPage`): header and
+hint, then one `href` row per item (title = name plus status pills such as "no speakers", "URGENT", "SOUNDING",
+"no URL", "ON"/"off"; description = a short summary, e.g. "1 speaker · fixed volume 20 · normal", "2 devices ·
+always", "1 siren · stop after 5 min", "chime.mp3 · 5 s", "ON until … · own switch"), then an **Add new …** href.
+No hideable sections and no name field on the list page.
+Each item opens its own **edit page** (`profileEditPage`, `notifyEditPage`, `sirenEditPage`, `soundEditPage`,
+`guestEditPage`) via `href … params: [id: <id>]`; Add opens it with `params: [id: "new", n: <nonce>]`. Hubitat drops
+params on submitOnChange redraws, so the id is kept in `state.editId_<kind>` (the nonce stops a redraw that resends
+"new" from making a second draft). The edit page shows all of the item's inputs (Name first) in normal sections,
+test buttons and "Used by", then **Save** and a two-step **Delete** ("Yes, delete" / "Cancel", `state.confirmDel`).
+**New items are drafts:** "new" allocates the next real id and stores it with `draft: true`. Drafts have no device
+or switch and are left out of every runtime path (`ids()`, `soundIds()`, `guestIds()`, routing, Guest Mode checks,
+counts, "Used by"). Save on a draft needs a name (sounds also a URL), clears `draft`, and creates the device / switch.
+Every page except that kind's edit page (and `initialize()`) calls `cleanDrafts()`, which deletes unsaved drafts and
+removes all their `<kind>_<id>_` settings. Delete on a draft just discards it.
+**Existing items:** inputs are stored as they change; Save relabels the device ("Changes are saved as you make
+them."). Buttons can't navigate, so after Save the page shows "✓ Saved" and a "Back to <list>" link. Delete works as
+before (device first; the item stays if the hub refuses, with the error shown).
+
 ### Announcement Profiles (each = one virtual speaker)
 `prof_<id>_name`, `prof_<id>_spk` (real speakers, `capability.speechSynthesis`, multiple),
 `prof_<id>_priority` normal / urgent, volume: `prof_<id>_volMode` daynight / fixed / caller ("Use the volume the rule
@@ -88,7 +108,8 @@ normal / quiet / only, `ntf_<id>_prefix` (optional text added before each messag
 power monitors), `sir_<id>_maxMin` "Stop after (minutes)" default 5, `sir_<id>_guest` normal / quiet.
 
 ### Sound files
-As FEATURE_SPEC_v2 §1.1: `state.sounds` id → [name, url, secs]; inputs `snd_<id>_name/_url/_secs`, add/delete/test.
+As FEATURE_SPEC_v2 §1.1: `state.sounds` id → [name, url, secs]; inputs `snd_<id>_name/_url/_secs` on the sound's
+edit page (a new sound's are the draft's own settings), delete, test (`sndTestSpk` picks the test speaker).
 Tip: Hubitat File Manager files are `http://<hub-ip>/local/<file>.mp3`.
 
 ### Speakers & queue
@@ -115,8 +136,8 @@ Turning on always pushes the warning text and the auto-off time to the testers; 
 
 ### Guest Modes (as many as you like)
 A list of named Guest Modes, e.g. "Guest Mode -SB", "Guest Mode Paul", "Guest Mode Lily", "Housekeeper". Ids `g1`,
-`g2`…; stored in `state.guests` id → [name]. Add with `newGuestName` (pre-filled **"Guest Mode -SB"** for the first
-one, blank afterwards) + `btnAddGuest`; delete link per mode (confirm).
+`g2`…; stored in `state.guests` id → [name]. Added with "Add new Guest Mode" like the other lists (the first one's
+name is pre-filled **"Guest Mode -SB"**); its switch is created on Save. Delete on its edit page (confirm).
 Per Guest Mode `<id>`:
 - `gm_<id>_name` (renaming relabels its switch);
 - `gm_<id>_source` create (default: Switchboard creates a Virtual Switch labelled with the name; a normal,
@@ -125,7 +146,8 @@ Per Guest Mode `<id>`:
 - `gm_<id>_endDate` + `gm_<id>_endTime` and an "On until…" button; `gm_<id>_defaultHours` "If turned on another
   way (dashboard, rule), turn off after (hours)", default 24, 0 = stay on; `gm_<id>_remindTime` + reminder
   notifiers `gm_<id>_remindDevs`.
-Guest Mode pills on the main page show each one that is on. On/off buttons per mode on the Guest Modes page.
+Guest Mode pills on the main page show each one that is on. On/off buttons per mode on the main page and on each
+Guest Mode's edit page.
 
 **Assigning them:** every profile, notifier and siren (prefix = `prof_<id>`, `ntf_<id>`, `sir_<id>`) has:
 - `<prefix>_guestPlay` "Play while any of these Guest Modes are on" (multi-select);
