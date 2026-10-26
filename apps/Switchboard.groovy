@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.1 - 2026-10-26 - Name, URL, tester and end-time fields save as you leave them (buttons couldn't see unsaved text).
  *  0.1.0 - 2026-10-26 - First build from Rule Forge 0.5.0's speech engine.
  */
 
@@ -26,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.0"
+@Field static final String APP_VERSION = "0.1.1"
 @Field static final String NS          = "almulder"
 @Field static final String APP_TITLE   = "Switchboard"
 @Field static final int    LOG_MAX     = 200
@@ -301,7 +302,7 @@ def profilesPage() {
             }
         }
         section(uiTitle(null, "Add a profile?")) {
-            input "newProfName", "text", title: "Name", required: false, width: 6
+            input "newProfName", "text", title: "Name", required: false, submitOnChange: true, width: 6
             input "btnAdd_prof", "button", title: "Add profile"
         }
     }
@@ -338,7 +339,7 @@ def notifyPage() {
             }
         }
         section(uiTitle(null, "Add one?")) {
-            input "newNtfName", "text", title: "Name", required: false, width: 6
+            input "newNtfName", "text", title: "Name", required: false, submitOnChange: true, width: 6
             input "btnAdd_ntf", "button", title: "Add"
         }
     }
@@ -371,7 +372,7 @@ def sirensPage() {
             }
         }
         section(uiTitle(null, "Add one?")) {
-            input "newSirName", "text", title: "Name", required: false, width: 6
+            input "newSirName", "text", title: "Name", required: false, submitOnChange: true, width: 6
             input "btnAdd_sir", "button", title: "Add"
         }
     }
@@ -388,7 +389,7 @@ def soundsPage() {
             if (!soundIds()) paragraph uiHint("No sounds yet. Add one below.")
         }
         if (soundIds()) section(uiTitle(null, "Where should tests play?")) {
-            input "sndTestSpk", "enum", title: "Speaker", options: speakerOptions(), required: false, width: 6
+            input "sndTestSpk", "enum", title: "Speaker", options: speakerOptions(), required: false, submitOnChange: true, width: 6
             if (!speakerOptions()) paragraph note("Pick speakers in an Announcement Profile first.")
         }
         soundIds().each { String sid ->
@@ -406,9 +407,9 @@ def soundsPage() {
             }
         }
         section(uiTitle(null, "Add a sound?")) {
-            input "newSndName", "text", title: "Name", required: false, width: 4
-            input "newSndUrl", "text", title: "URL" + tip(SND_URL_TIP), required: false, width: 6
-            input "newSndSecs", "number", title: "Length (seconds)", defaultValue: 5, range: "1..3600", required: false, width: 2
+            input "newSndName", "text", title: "Name", required: false, submitOnChange: true, width: 4
+            input "newSndUrl", "text", title: "URL" + tip(SND_URL_TIP), required: false, submitOnChange: true, width: 6
+            input "newSndSecs", "number", title: "Length (seconds)", defaultValue: 5, range: "1..3600", required: false, submitOnChange: true, width: 2
             input "btnAddSound", "button", title: "Add sound"
         }
     }
@@ -476,9 +477,9 @@ def testPage() {
             paragraph note("Only this page can turn Test Mode on. There is no switch for it, so dashboards, rules and voice can't start it.") +
                       tip("It turns off by itself after the time below, when you press Turn off, or when the hub restarts. Each time it ends, you have to tick the box again to turn it back on.")
             input "tmDevices", "capability.notification", title: "Testers" + tip("Who gets every alert while Test Mode is on, and the Test Mode reminders."),
-                  multiple: true, required: false
+                  multiple: true, required: false, submitOnChange: true
             input "tmAutoOff", "enum", title: "Turn off after" + tip("Required for safety: while Test Mode is on, real alarms only reach the testers' phones. Never more than 4 hours."),
-                  options: TM_AUTO_OFF, defaultValue: "60", required: true, width: 6
+                  options: TM_AUTO_OFF, defaultValue: "60", required: true, submitOnChange: true, width: 6
             input "tmRemind", "number", title: "Remind testers every (minutes), 0 = off", range: "0..240", defaultValue: 60, width: 6
         }
     }
@@ -519,8 +520,8 @@ def guestPage() {
                     paragraph note("Your mode rules turn it on and off; Switchboard can't.")
                 }
                 if (src != "modes") {
-                    input pre + "endDate", "date", title: "Guests leave on", required: false, width: 4
-                    input pre + "endTime", "time", title: "at", required: false, width: 4
+                    input pre + "endDate", "date", title: "Guests leave on", required: false, submitOnChange: true, width: 4
+                    input pre + "endTime", "time", title: "at", required: false, submitOnChange: true, width: 4
                     if (settings[pre + "endDate"] && settings[pre + "endTime"]) input "btnGmUntil_${gid}", "button", title: "On until then", width: 4
                     input pre + "defaultHours", "number", title: "If turned on another way (dashboard, rule), turn off after (hours)" +
                           tip("0 = stay on until something turns it off."), defaultValue: 24, range: "0..720", width: 6
@@ -537,7 +538,7 @@ def guestPage() {
             }
         }
         section(uiTitle(null, "Add a Guest Mode?")) {
-            input "newGuestName", "text", title: "Name", required: false, width: 6, defaultValue: guestIds() ? null : "Guest Mode -SB"
+            input "newGuestName", "text", title: "Name", required: false, submitOnChange: true, width: 6, defaultValue: guestIds() ? null : "Guest Mode -SB"
             input "btnAddGuest", "button", title: "Add Guest Mode"
             paragraph note("Its switch is created right away.")
         }
