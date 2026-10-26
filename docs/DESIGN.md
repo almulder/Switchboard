@@ -175,7 +175,13 @@ message is a duplicate within dedupe — testers see every event; tester dedupe 
 **Source lookup:** ~1500 ms after a command arrives, `asynchttpGet` `http://127.0.0.1:8080/device/eventsJson/<deviceId>`
 (cookie from optional login), find the newest `type == "command"` row for that command within ±5 s (and matching
 text where present), strip HTML from `producedBy` → source name (e.g. "Goodnight 🌙"). Update the log entry and the
-device's `lastSource`. Text prefix `[Name] ` at the start of a message overrides the lookup and is removed before
+device's `lastSource`. The `producedBy` link's app id is then looked up once (`/installedapp/statusJson/<appId>` → `installedApp.name`,
+e.g. "webCoRE Piston", "Rule-5.1") and cached, so the source reads "WC – Goodnight" (WC webCoRE, RM Rule Machine,
+BR Basic Rules, HSM, RL Room Lighting, BC Button Controllers, SAR Simple Automation Rules, NT Notifications,
+API Maker API, DB dashboards; any other app shows its own type). A legend sits above the log.
+Real speakers are only ever driven from Switchboard's own scheduled run (never inside the rule's call), so a real
+speaker's Events page always credits "Switchboard". Cost ≈ 0.3 s.
+Text prefix `[Name] ` at the start of a message overrides the lookup and is removed before
 speaking/pushing. Failures → "unknown"; never delays delivery. Undocumented endpoint: wrap all parsing in try/catch.
 
 **Hub restart:** `systemStart` → Test Mode off (push to testers), re-initialize, clear stale busy state. The queue
