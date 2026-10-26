@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.4.1 - 2026-10-26 - Next on an edit page saves like Save; new items no longer get lost or duplicated when Hubitat redraws pages.
  *  0.4.0 - 2026-10-26 - Sirens: after any off, Switchboard checks they really turned off and retries; pushes a warning if one is still on after 10 s. A retry never follows a re-trigger, and a siren turned on by something else is left alone.
  *  0.3.0 - 2026-10-26 - Stop alarms: disarming Safety Monitor (or the Stop All switch / button) stops sirens and sounds; draft cleanup removes empty device pickers.
  *  0.2.1 - 2026-10-26 - Every page accepts link parameters (Hubitat passed an edit link's [id] to the list page and it crashed).
@@ -38,7 +39,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.4.0"
+@Field static final String APP_VERSION = "0.4.1"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -119,6 +120,7 @@ preferences {
     page(name: "testPage")
     page(name: "guestPage")
     page(name: "guestEditPage")
+    page(name: "commitPage")
     page(name: "logPage")
     page(name: "settingsPage")
 }
@@ -226,7 +228,7 @@ private void deleteControls(String kind, String id, String what) {
 // ===================================================================== PAGES
 
 def mainPage(params = null) {
-    cleanDrafts(); state.remove("confirmDel")
+    state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "mainPage", title: "", install: true, uninstall: true) {
         section {
@@ -334,7 +336,7 @@ private String newDraft(String kind) {
     while (m.containsKey(id)) { next++; id = "${e.idp}${next}".toString() }
     state[counter] = next + 1
     removeItemSettings(kind, id)
-    m[id] = [name: "", draft: true]
+    m[id] = [name: "", draft: true, touched: now()]
     state[e.stateKey as String] = m
     if (kind == "gm" && !guestIds()) app.updateSetting("gm_${id}_name", [type: "text", value: "Guest Mode -SB"])
     return id
@@ -358,20 +360,23 @@ private void cleanDrafts(String keepKind = null, String keepId = null) {
 }
 
 /**
- * The item an edit page shows. Opened by href with params [id: <id>] or [id: "new", n: <nonce>]; Hubitat drops params
- * on submitOnChange redraws, so the id is kept in state.editId_<kind>. The nonce stops a redraw that does resend
- * "new" from making a second draft. Returns null when the item is gone (deleted, discarded).
+ * The item an edit page shows. Opened by href with params [id: <id>] or [id: "new"]; Hubitat drops params on
+ * submitOnChange redraws, so the id is kept in state.editId_<kind>. Returns null when the item is gone.
  */
 private String editTarget(String kind, params) {
     String key = "editId_${kind}".toString()
     String pid = params?.id ? params.id.toString() : null
     if (pid == "new") {
-        String nonce = (params?.n ?: "").toString()
-        String cur = state[key] as String
-        // same nonce = a redraw of the same "Add new" (even after Save or Delete): keep the item, never a second draft
-        if (!(cur && (state["editNonce_${kind}".toString()] as String) == nonce)) {
+        // Hubitat re-renders pages (and rebuilds links) during redraws, so "new" can arrive many times for one Add:
+        // show the item just saved (if any, for 20 s), else keep filling the open draft, else start a fresh one.
+        Map sv = state["savedNew_${kind}".toString()] as Map
+        Map dr = rawMap(kind).find { k, v -> v instanceof Map && v.draft == true }?.with { [id: it.key, v: it.value] }
+        String cur
+        if (sv && now() - ((sv.at ?: 0) as Long) < 20000L && rawMap(kind).containsKey(sv.id)) cur = sv.id as String
+        else if (dr && now() - (((dr.v as Map).touched ?: 0) as Long) < 120000L) cur = dr.id as String
+        else {
+            if (dr) discardDraft(kind, dr.id as String)
             cur = newDraft(kind)
-            state["editNonce_${kind}".toString()] = nonce
             state.remove("confirmDel"); state.remove("editSaved"); state.remove("editErr")
         }
         state[key] = cur
@@ -380,8 +385,10 @@ private String editTarget(String kind, params) {
         state[key] = pid
     }
     String id = state[key] as String
-    cleanDrafts(kind, id)
-    return id && rawMap(kind).containsKey(id) ? id : null
+    state.editKind = kind
+    Map m = rawMap(kind)
+    if (id && m[id] instanceof Map && m[id].draft == true) { m[id].touched = now(); state[EDITS[kind].stateKey as String] = m }
+    return id && m.containsKey(id) ? id : null
 }
 
 private String itemTitle(String kind, String id) {
@@ -403,8 +410,7 @@ private boolean editHead(String kind, String id) {
             paragraph uiOk("Saved")
             href name: "hrefBackTop_${kind}", page: e.list as String, title: "Back to ${e.listTitle}", description: ""
         } else if (draft) {
-            paragraph uiHint("New and not saved yet. Fill it in, then press <b>Save</b> at the bottom. " +
-                             "If you leave this page without saving, it is thrown away.")
+            paragraph uiHint("New and not saved yet. Fill it in, then press <b>Save</b> (or <b>Next</b>) at the bottom.")
         }
     }
     return id != null
@@ -421,7 +427,7 @@ private void editFoot(String kind, String id) {
             href name: "hrefBack_${kind}", page: e.list as String, title: "Back to ${e.listTitle}", description: ""
             state.remove("editSaved")
         } else {
-            paragraph note(draft ? "Press Save to create it. Leaving without saving throws it away." : "Changes are saved as you make them.")
+            paragraph note(draft ? "Press Save or Next to create it." : "Changes are saved as you make them.")
             input "btnSave_${key}", "button", title: "Save", width: 3
         }
         deleteControls(kind, id, e.what as String)
@@ -435,7 +441,7 @@ private void editRow(String kind, String id, String title, String desc) {
 private void addRow(String kind) {
     Map e = EDITS[kind]
     section {
-        href name: "hrefAdd_${kind}", page: e.edit as String, params: [id: "new", n: now().toString()],
+        href name: "hrefAdd_${kind}", page: e.edit as String, params: [id: "new"],
              title: "Add new ${e.what}", description: "Opens a new ${e.what}. It is created when you press Save."
     }
 }
@@ -456,6 +462,7 @@ private void saveItem(String kind, String id) {
         state[e.stateKey as String] = m
         if (KINDS[kind]) ensureDevice(kind, id, n)
         else if (kind == "gm") { ensureGuestSwitch(id); initGuests() }      // subscribes hub modes too, no Done needed
+        state["savedNew_${kind}".toString()] = [id: id, at: now()]
         logInfo "Added ${e.what} '${n}'"
     } else {
         if (KINDS[kind]) syncNames()
@@ -467,7 +474,7 @@ private void saveItem(String kind, String id) {
 
 // ------------------------------------------------------------------ Announcement Profiles
 def profilesPage(params = null) {
-    cleanDrafts(); state.remove("confirmDel")
+    state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "profilesPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -493,7 +500,7 @@ def profilesPage(params = null) {
 
 def profileEditPage(params = null) {
     String pid = editTarget("prof", params)
-    dynamicPage(name: "profileEditPage", title: "", install: false, uninstall: false, nextPage: "profilesPage") {
+    dynamicPage(name: "profileEditPage", title: "", install: false, uninstall: false, nextPage: "commitPage") {
         if (!editHead("prof", pid)) return
         boolean draft = isDraft("prof", pid)
         String pre = "prof_${pid}_"
@@ -548,7 +555,7 @@ def profileEditPage(params = null) {
 
 // ------------------------------------------------------------------ Notifications
 def notifyPage(params = null) {
-    cleanDrafts(); state.remove("confirmDel")
+    state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "notifyPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -569,7 +576,7 @@ def notifyPage(params = null) {
 
 def notifyEditPage(params = null) {
     String nid = editTarget("ntf", params)
-    dynamicPage(name: "notifyEditPage", title: "", install: false, uninstall: false, nextPage: "notifyPage") {
+    dynamicPage(name: "notifyEditPage", title: "", install: false, uninstall: false, nextPage: "commitPage") {
         if (!editHead("ntf", nid)) return
         boolean draft = isDraft("ntf", nid)
         String pre = "ntf_${nid}_"
@@ -604,7 +611,7 @@ def notifyEditPage(params = null) {
 
 // ------------------------------------------------------------------ Sirens
 def sirensPage(params = null) {
-    cleanDrafts(); state.remove("confirmDel")
+    state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "sirensPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -641,7 +648,7 @@ def sirensPage(params = null) {
 
 def sirenEditPage(params = null) {
     String rid = editTarget("sir", params)
-    dynamicPage(name: "sirenEditPage", title: "", install: false, uninstall: false, nextPage: "sirensPage") {
+    dynamicPage(name: "sirenEditPage", title: "", install: false, uninstall: false, nextPage: "commitPage") {
         if (!editHead("sir", rid)) return
         boolean draft = isDraft("sir", rid)
         String pre = "sir_${rid}_"
@@ -672,7 +679,7 @@ def sirenEditPage(params = null) {
 
 // ------------------------------------------------------------------ Sound files
 def soundsPage(params = null) {
-    cleanDrafts(); state.remove("confirmDel")
+    state.remove("confirmDel")
     syncSounds()
     dynamicPage(name: "soundsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -692,7 +699,7 @@ def soundsPage(params = null) {
 
 def soundEditPage(params = null) {
     String sid = editTarget("snd", params)
-    dynamicPage(name: "soundEditPage", title: "", install: false, uninstall: false, nextPage: "soundsPage") {
+    dynamicPage(name: "soundEditPage", title: "", install: false, uninstall: false, nextPage: "commitPage") {
         if (!editHead("snd", sid)) return
         boolean draft = isDraft("snd", sid)
         String pre = "snd_${sid}_"
@@ -721,7 +728,6 @@ def soundEditPage(params = null) {
 
 // ------------------------------------------------------------------ Speakers & queue
 def speakersPage(params = null) {
-    cleanDrafts()
     dynamicPage(name: "speakersPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Speakers & queue", "${APP_TITLE} · Setup")
@@ -757,7 +763,6 @@ def speakersPage(params = null) {
 
 // ------------------------------------------------------------------ Test Mode
 def testPage(params = null) {
-    cleanDrafts()
     dynamicPage(name: "testPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Test Mode", "${APP_TITLE}")
@@ -794,7 +799,7 @@ def testPage(params = null) {
 
 // ------------------------------------------------------------------ Guest Mode
 def guestPage(params = null) {
-    cleanDrafts(); state.remove("confirmDel")
+    state.remove("confirmDel")
     syncGuests()
     dynamicPage(name: "guestPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -822,7 +827,7 @@ def guestPage(params = null) {
 def guestEditPage(params = null) {
     String gid = editTarget("gm", params)
     syncGuests()
-    dynamicPage(name: "guestEditPage", title: "", install: false, uninstall: false, nextPage: "guestPage") {
+    dynamicPage(name: "guestEditPage", title: "", install: false, uninstall: false, nextPage: "commitPage") {
         if (!editHead("gm", gid)) return
         boolean draft = isDraft("gm", gid)
         String pre = "gm_${gid}_"
@@ -877,9 +882,21 @@ def guestEditPage(params = null) {
         editFoot("gm", gid)
     }
 }
+/** Next on an edit page = Save: saves (creates a new item), then shows its list. A new item missing its name stays open with the reason. */
+def commitPage(params = null) {
+    String kind = state.editKind as String
+    if (!kind || !EDITS[kind]) return mainPage()
+    String id = state["editId_${kind}".toString()] as String
+    if (id && rawMap(kind).containsKey(id)) {
+        saveItem(kind, id)
+        if (isDraft(kind, id)) return this."${EDITS[kind].edit}"()
+        state.remove("editSaved")
+    }
+    return this."${EDITS[kind].list}"()
+}
+
 // ------------------------------------------------------------------ Message log
 def logPage(params = null) {
-    cleanDrafts()
     dynamicPage(name: "logPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         List all = logEntries()
         section {
@@ -971,7 +988,6 @@ private String logTable(List rows) {
 
 // ------------------------------------------------------------------ Settings
 def settingsPage(params = null) {
-    cleanDrafts()
     dynamicPage(name: "settingsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Settings", "${APP_TITLE} · Setup")
