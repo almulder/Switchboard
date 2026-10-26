@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.7 - 2026-10-26 - "From" legend only on the Message log page again (removed from the main page).
  *  0.1.6 - 2026-10-26 - Message log filters by From (a rules system or one rule) and by When (quick ranges or between dates).
  *  0.1.5 - 2026-10-26 - The "From" legend also shows above Latest messages on the main page.
  *  0.1.4 - 2026-10-26 - Real speakers are only driven from Switchboard's own run, so their Events page always shows Switchboard.
@@ -32,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.6"
+@Field static final String APP_VERSION = "0.1.7"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -244,7 +245,6 @@ def mainPage() {
         }
         section(uiTitle(null, "Latest messages")) {
             List l = logEntries()
-            if (l) paragraph fromLegend()
             paragraph l ? logTable(l.take(10)) : note("Nothing yet.")
             href "logPage", title: "Message log", description: "All ${l.size()} entries, with filters"
         }
