@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.2.1 - 2026-10-26 - Every page accepts link parameters (Hubitat passed an edit link's [id] to the list page and it crashed).
  *  0.2.0 - 2026-10-26 - Setup lists open each item on its own page with Save / Delete; new items are drafts until saved.
  *  0.1.8 - 2026-10-26 - Message log keeps the last 100 messages (was 200).
  *  0.1.7 - 2026-10-26 - "From" legend only on the Message log page again (removed from the main page).
@@ -35,7 +36,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.2.0"
+@Field static final String APP_VERSION = "0.2.1"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -221,7 +222,7 @@ private void deleteControls(String kind, String id, String what) {
 
 // ===================================================================== PAGES
 
-def mainPage() {
+def mainPage(params = null) {
     cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "mainPage", title: "", install: true, uninstall: true) {
@@ -450,7 +451,7 @@ private void saveItem(String kind, String id) {
 }
 
 // ------------------------------------------------------------------ Announcement Profiles
-def profilesPage() {
+def profilesPage(params = null) {
     cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "profilesPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
@@ -531,7 +532,7 @@ def profileEditPage(params = null) {
 }
 
 // ------------------------------------------------------------------ Notifications
-def notifyPage() {
+def notifyPage(params = null) {
     cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "notifyPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
@@ -587,7 +588,7 @@ def notifyEditPage(params = null) {
 }
 
 // ------------------------------------------------------------------ Sirens
-def sirensPage() {
+def sirensPage(params = null) {
     cleanDrafts(); state.remove("confirmDel")
     syncNames()
     dynamicPage(name: "sirensPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
@@ -641,7 +642,7 @@ def sirenEditPage(params = null) {
 }
 
 // ------------------------------------------------------------------ Sound files
-def soundsPage() {
+def soundsPage(params = null) {
     cleanDrafts(); state.remove("confirmDel")
     syncSounds()
     dynamicPage(name: "soundsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
@@ -690,7 +691,7 @@ def soundEditPage(params = null) {
 }
 
 // ------------------------------------------------------------------ Speakers & queue
-def speakersPage() {
+def speakersPage(params = null) {
     cleanDrafts()
     dynamicPage(name: "speakersPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -726,7 +727,7 @@ def speakersPage() {
 }
 
 // ------------------------------------------------------------------ Test Mode
-def testPage() {
+def testPage(params = null) {
     cleanDrafts()
     dynamicPage(name: "testPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
@@ -763,7 +764,7 @@ def testPage() {
 
 
 // ------------------------------------------------------------------ Guest Mode
-def guestPage() {
+def guestPage(params = null) {
     cleanDrafts(); state.remove("confirmDel")
     syncGuests()
     dynamicPage(name: "guestPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
@@ -848,7 +849,7 @@ def guestEditPage(params = null) {
     }
 }
 // ------------------------------------------------------------------ Message log
-def logPage() {
+def logPage(params = null) {
     cleanDrafts()
     dynamicPage(name: "logPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         List all = logEntries()
@@ -939,7 +940,7 @@ private String logTable(List rows) {
 }
 
 // ------------------------------------------------------------------ Settings
-def settingsPage() {
+def settingsPage(params = null) {
     cleanDrafts()
     dynamicPage(name: "settingsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
