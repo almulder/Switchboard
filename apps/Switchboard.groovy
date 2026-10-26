@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.2 - 2026-10-26 - Switchboard's own devices are never used as real speakers, phones or sirens (would loop).
  *  0.1.1 - 2026-10-26 - Name, URL, tester and end-time fields save as you leave them (buttons couldn't see unsaved text).
  *  0.1.0 - 2026-10-26 - First build from Rule Forge 0.5.0's speech engine.
  */
@@ -27,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.1.1"
+@Field static final String APP_VERSION = "0.1.2"
 @Field static final String NS          = "almulder"
 @Field static final String APP_TITLE   = "Switchboard"
 @Field static final int    LOG_MAX     = 200
@@ -274,6 +275,7 @@ def profilesPage() {
                 input pre + "priority", "enum", title: "How important?" + tip("Urgent messages jump the queue and interrupt normal ones; use for smoke, CO, water and alarms. Urgent messages never interrupt each other."),
                       options: [normal: "Normal", urgent: "Urgent — interrupts other announcements"], defaultValue: "normal", submitOnChange: true, width: 6
                 input pre + "spk", "capability.speechSynthesis", title: "Which speakers?", multiple: true, required: false, submitOnChange: true
+                if (((settings[pre + "spk"] ?: []) as List).size() != realDevs(settings[pre + "spk"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real speakers.")
                 if (!n) paragraph warn("Pick at least one speaker, or messages to this profile go nowhere.")
                 input pre + "volMode", "enum", title: "How loud?" + tip("Day / night: uses the night window from Settings. Use the volume the rule sends: the volume in speak(text, volume), or the last setVolume a rule sent to this Switchboard device (it never changes the real speakers' volume by itself)."),
                       submitOnChange: true, defaultValue: "daynight", width: 6,
@@ -325,6 +327,7 @@ def notifyPage() {
                 input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
                 input pre + "devs", "capability.notification", title: "Send to" + tip("Hubitat app phones, Pushover, email or SMS drivers."),
                       multiple: true, required: false, submitOnChange: true
+                if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real phones or notification devices.")
                 if (!n) paragraph warn("Pick at least one device.")
                 input pre + "when", "enum", title: "When", defaultValue: "always", width: 6,
                       options: [always: "Always", away: "Only when nobody is home"]
@@ -363,6 +366,7 @@ def sirensPage() {
                 input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
                 input pre + "devs", "capability.alarm", title: "Real sirens" + tip("Some devices claim to be an alarm but aren't sirens (e.g. some power monitors). Pick only real sirens and strobes."),
                       multiple: true, required: false, submitOnChange: true
+                if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real sirens.")
                 input pre + "maxMin", "number", title: "Stop after (minutes)" + tip("Sirens are turned off after this long even if no rule turns them off. 0 = never."),
                       range: "0..60", defaultValue: 5, width: 6
                 guestInputs("sir_${rid}", false)
@@ -657,7 +661,7 @@ void appButtonHandler(String btn) {
     }
     if (btn.startsWith("btnTestNtf_")) {
         String nid = btn - "btnTestNtf_"
-        List devs = (settings["ntf_${nid}_devs"] ?: []) as List
+        List devs = realDevs(settings["ntf_${nid}_devs"])
         pushTo(devs, "Test from ${APP_TITLE} (${itemName('ntf', nid)}).", false)
         return
     }
@@ -948,7 +952,7 @@ void sbNotify(String dni, String rawText) {
     } else if (isDuplicate(dni, text, intSet("ntf_${nid}_dedupeSec", 15))) {
         entry.outcome = "skipped duplicate"
     } else {
-        List devs = (settings["ntf_${nid}_devs"] ?: []) as List
+        List devs = realDevs(settings["ntf_${nid}_devs"])
         String pfx = (settings["ntf_${nid}_prefix"] ?: "").toString().trim()
         String ptag = (text =~ /^\[[HLNES]\]/).find() ? text.take(3) : ""     // a rule's own Pushover tag stays first
         String msg = pfx ? "${ptag}${pfx} ${text.substring(ptag.length()).trim()}".toString() : text
@@ -1004,7 +1008,7 @@ void sbSiren(String dni, String mode) {
 /** sends the command to the real sirens; returns how many accepted it */
 private int sirenCommand(String rid, String m) {
     int ok = 0
-    ((settings["sir_${rid}_devs"] ?: []) as List).each { dev ->
+    realDevs(settings["sir_${rid}_devs"]).each { dev ->
         try {
             switch (m) {
                 case "siren":  dev.siren();  break
@@ -1553,9 +1557,11 @@ private void guestNotice(String gid, String msg) {
 // ===================================================================== SPEECH ENGINE
 
 /** every real speaker used by a profile */
+/** real devices only: Switchboard's own virtual devices show up in the pickers, and sending to one would loop */
+List realDevs(def list) { ((list ?: []) as List).findAll { d -> d && !(d.deviceNetworkId ?: "").startsWith("SB-${app.id}-") } }
 List allSpeakers() {
     List devs = []
-    ids("prof").each { pid -> devs += ((settings["prof_${pid}_spk"] ?: []) as List) }
+    ids("prof").each { pid -> devs += realDevs(settings["prof_${pid}_spk"]) }
     return devs.unique { it.id }
 }
 Map speakerOptions() { allSpeakers().collectEntries { [(it.id.toString()): it.displayName] }.sort { it.value } }
@@ -1743,7 +1749,7 @@ private void markBusy(ConcurrentHashMap<String, Map> busy, List<String> res, Lis
 
 private List resolveSpeakers(Map item) {
     Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
-    if (item.profile) return ((settings["prof_${item.profile}_spk"] ?: []) as List).unique { it.id }
+    if (item.profile) return realDevs(settings["prof_${item.profile}_spk"]).unique { it.id }
     return (item.speakers ?: []).collect { byId[it.toString()] }.findAll { it }.unique { it.id }
 }
 
