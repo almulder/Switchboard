@@ -139,7 +139,7 @@ Urgent profiles show the hint "Safety alerts should keep playing during Guest Mo
 setting and `_guestOnly`.)
 
 ### Message log
-Last 200 entries in `state.log` (time, device, kind speak/sound/push/siren, text, outcome: played / queued / skipped
+Last 100 entries in `state.log` (time, device, kind speak/sound/push/siren, text, outcome: played / queued / skipped
 duplicate / skipped stale / skipped guest / test → testers / failed, source). Page shows newest first with filters
 by device and outcome; "Clear log" button.
 
