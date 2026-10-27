@@ -38,3 +38,7 @@ Design stage. Planned features may change before the first release.
 ## Feedback
 
 Ideas and questions are welcome in [Issues](../../issues).
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md): free for personal and other noncommercial use. Commercial use of any part of this code is not permitted.
