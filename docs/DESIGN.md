@@ -252,7 +252,8 @@ modes, endDate, endTime, defaultHours, remindTime, remindDevs.
 **Speech queue:** reuse Rule Forge's engine (ConcurrentLinkedQueue per app, semaphore, measured TTS duration, urgent
 queue interrupts normal but never another urgent, stale drop, per-speaker methods, volume restore, Sonos
 `playHighPriorityTTS` for urgent). Each item: [dni, profile, text|uri|sound, kind, callerVolume, queuedAt, source].
-Order per profile item: chime → sound/track → text; busy time = sound secs or measured text length + lead + gap.
+Order per profile item: chime → sound/track → text; busy time = sound secs or measured text length + lead, plus the
+gap after the item's last part only (0.7.4: a chime runs straight into its words; set the sound's length to tune it).
 Track playback: `playTrackAndRestore(url, vol)` if supported, else set volume + `playTrack(url)` and restore after
 `secs`. A `playTrack(uri)` from a rule whose uri matches a library sound uses that sound's length; otherwise
 `defaultTrackSecs` (Settings, default 10).

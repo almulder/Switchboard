@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.7.4 - 2026-10-27 - A chime runs straight into its words: the pause between messages now only follows the last part.
  *  0.7.3 - 2026-10-27 - Per-speaker "Play sounds without restore" (Speakers & queue): for speakers such as Sonos S1 that hold up
  *                       the next message for minutes after playTrackAndRestore. Sounds then use setVolume + playTrack.
  *  0.7.2 - 2026-10-27 - Deleting an item whose device was missing clears "(1 device missing)" right away;
@@ -49,7 +50,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.7.3"
+@Field static final String APP_VERSION = "0.7.4"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -2849,7 +2850,9 @@ private long playTrackOn(Map item, String url, Integer secs, String name, List d
     long startedAt = now()
     Integer assumed = (secs ?: 5) as Integer
     BigDecimal lead = played.collect { (settings["spkLead_${it.id}"] ?: 0) as BigDecimal }.max() ?: 0
-    BigDecimal extra = lead + ((gapSec != null ? gapSec : 2) as BigDecimal)
+    // the pause between messages goes after the last part only: a chime runs straight into its words
+    boolean last = ((item.step ?: 0) as Integer) >= ((item.parts ?: []) as List).size()
+    BigDecimal extra = lead + (last ? ((gapSec != null ? gapSec : 2) as BigDecimal) : 0)
     BigDecimal wait = assumed + extra
     long end = startedAt + ((wait * 1000) as long)
     logInfo "Playing ${name} (${wait}s) on ${played*.displayName.join(', ')} @${vol != null ? vol : '-'}" + (item.source ? " [${item.source}]" : "")
