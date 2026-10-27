@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.7.2 - 2026-10-27 - Deleting an item whose device was missing clears "(1 device missing)" right away;
+ *                       Save re-checks too.
  *  0.7.1 - 2026-10-26 - Leftover cleanup also removes the empty settings of deleted items (blank times, empty device lists).
  *  0.7.0 - 2026-10-26 - A Switchboard device deleted outside the app is no longer re-created on its own: it shows as missing (main page, its list and page, and "(1 device missing)" after the app's name in the Apps list) with Recreate or Delete. Leftover settings of deleted items are cleaned up.
  *  0.6.0 - 2026-10-26 - Every Switchboard device (Announce, Notify, Siren, Guest Mode and Stop All switches) is now a child of one "Switchboard" parent device. Needs the Switchboard Parent and Switchboard Switch drivers.
@@ -45,7 +47,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.7.1"
+@Field static final String APP_VERSION = "0.7.2"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -1186,7 +1188,7 @@ void appButtonHandler(String btn) {
     if (btn.startsWith("btnGmOff_"))   { guestOff(btn - "btnGmOff_"); return }
     if (btn.startsWith("btnSave_")) {
         List p = (btn - "btnSave_").split("_", 2) as List
-        if (p.size() == 2 && EDITS[p[0]]) saveItem(p[0] as String, p[1] as String)
+        if (p.size() == 2 && EDITS[p[0]]) { saveItem(p[0] as String, p[1] as String); refreshMissing() }    // its device may not have been created
         return
     }
     if (btn.startsWith("btnDelYes_")) {
@@ -1202,6 +1204,7 @@ void appButtonHandler(String btn) {
                 if (!rawMap(kind).containsKey(id)) state.editMsg = "Deleted."
             }
             if (!rawMap(kind).containsKey(id)) state["deleted_${kind}".toString()] = now()    // a redraw now shows "Deleted", not a new draft
+            refreshMissing()    // it may have been the missing one
         }
         return
     }
