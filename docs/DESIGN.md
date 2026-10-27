@@ -14,21 +14,35 @@ Goals: simple to set up, no changes to how people write rules, nothing silently 
 | `drivers/Switchboard_Speaker.groovy` | driver "Switchboard Speaker" | virtual speaker, one per Announcement Profile |
 | `drivers/Switchboard_Notifier.groovy` | driver "Switchboard Notifier" | virtual notification device |
 | `drivers/Switchboard_Siren.groovy` | driver "Switchboard Siren" | virtual siren |
+| `drivers/Switchboard_Parent.groovy` | driver "Switchboard Parent" | the one "Switchboard" device; every other device is its child |
+| `drivers/Switchboard_Switch.groovy` | driver "Switchboard Switch" | Stop All and Guest Mode switches |
 
-All four start at **0.1.0**. Header, author and licence like Rule Forge (PolyForm Noncommercial 1.0.0).
+The drivers start at **0.1.0**. Header, author and licence like Rule Forge (PolyForm Noncommercial 1.0.0).
 
-## 2. Virtual devices (children of the app)
+## 2. Virtual devices (children of one "Switchboard" parent device)
 
-Created with `addChildDevice("almulder", "<driver name>", dni, [name:, label:, isComponent: false])`.
+The app's only child is the parent device "Switchboard" (driver "Switchboard Parent", DNI `SB-<appId>-hub`, created
+in `initialize()`). Every other Switchboard device is a child of that device, so they sit together under one entry in
+the device list (Albert, 0.6.0). The parent driver creates them with
+`addChildDevice("almulder", "<driver name>", dni, [name:, label:, isComponent: false])` when the app calls
+`sbAddChild(driver, dni, label)`; the app also uses `sbChild(dni)`, `sbChildren()`, `sbDeleteChild(dni)`,
+`sbRelabel(dni, label)` and `sbEvent(dni, name, value)` on it. Children call the parent device with the contract below
+and the parent passes each call on to the app unchanged. No upgrade path from 0.5.x (app-child devices): their
+DNIs clash, so 0.5 devices are deleted by hand before the 0.6 code goes on (only Albert's test hub had 0.5).
 DNIs: `SB-<appId>-spk-<id>`, `SB-<appId>-ntf-<id>`, `SB-<appId>-snd-<id>` (siren). Ids are short (`p1`, `n1`, `r1`).
 Labels: "Announce – <profile name>", "Notify – <name>", "Siren – <name>"; renaming in the app relabels the device.
-Deleting an item in the app deletes its device (with a confirm link). `uninstalled()` deletes all children.
+Deleting an item in the app deletes its device (with a confirm link). `uninstalled()` deletes the parent's children, then the parent.
 
 **Stop All switch:** when `stopSwitchOn` is on (default), Switchboard also creates a normal (non-component) child
-`addChildDevice("hubitat", "Virtual Switch", "SB-<appId>-stopall", [label: "Switchboard – Stop All"])` for
+switch (driver "Switchboard Switch", DNI `SB-<appId>-stopall`, label "Switchboard – Stop All") for
 dashboards, buttons and voice. Turning it on runs Stop all (§4) and Switchboard turns it back off after ~2 s.
 Turning the setting off deletes it (if the hub refuses, the error is shown and the switch is kept). Guest Mode
 switches use their own DNIs (`SB-<appId>-gm-<id>`).
+
+**Switchboard Switch** (Stop All, created Guest Mode switches): `on()` / `off()` set `switch` and call
+`parent.sbSwitch(dni, "on"|"off")`. The app handles it ~50 ms later (`runInMillis`, `overwrite: false`), like an event
+subscription, so the app's own `on()` / `off()` never re-enter it. Switches picked from elsewhere ("existing" Guest
+Mode source) are still subscribed.
 
 ### Contract: driver → app (the only calls drivers make)
 
@@ -39,10 +53,11 @@ parent.sbStop(String dni)
 parent.sbVolume(String dni, Integer volume)   // setVolume / volumeUp / volumeDown / mute result
 parent.sbNotify(String dni, String text)
 parent.sbSiren(String dni, String mode)       // "siren" | "strobe" | "both" | "off"
+parent.sbSwitch(String dni, String value)     // Switchboard Switch: "on" | "off"
 ```
 
 Drivers keep no logic beyond parsing arguments, calling the parent, and showing attributes. The app updates driver
-attributes with `child.sendEvent(name:, value:)` on the child device (ChildDeviceWrapper supports `sendEvent`).
+attributes through the parent device (`sbEvent`, which calls `sendEvent` on its child).
 
 ### Speaker driver
 Capabilities: `Actuator`, `SpeechSynthesis`, `AudioNotification`, `MusicPlayer`, `AudioVolume`, `Refresh`.

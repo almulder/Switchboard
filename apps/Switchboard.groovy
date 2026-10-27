@@ -6,8 +6,8 @@
  *  Switchboard decides how, when and whether the real speakers, phones and sirens are used:
  *  one queue for every speaker, volume by day/night, Guest Mode, Test Mode and a message log.
  *
- *  Requires Hubitat platform 2.5.0 or newer and the three Switchboard drivers
- *  (Switchboard Speaker, Switchboard Notifier, Switchboard Siren).
+ *  Requires Hubitat platform 2.5.0 or newer and the five Switchboard drivers
+ *  (Switchboard Parent, Switchboard Speaker, Switchboard Notifier, Switchboard Siren, Switchboard Switch).
  *
  *  Author:    Albert Mulder (almulder)
  *  Copyright: © 2026 Albert Mulder
@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.6.0 - 2026-10-26 - Every Switchboard device (Announce, Notify, Siren, Guest Mode and Stop All switches) is now a child of one "Switchboard" parent device. Needs the Switchboard Parent and Switchboard Switch drivers.
  *  0.5.0 - 2026-10-26 - One sound dropdown (hub files + web address); real track length from the speaker; hub login removed (not needed).
  *  0.4.3 - 2026-10-26 - Picking a hub sound file sets its estimated length; deleting a new item shows "Deleted" instead of opening another blank one.
  *  0.4.2 - 2026-10-26 - Sound files: pick one of the hub's File Manager audio files from a list (length estimated), or enter a web address with a short how-to and checks.
@@ -42,7 +43,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.5.0"
+@Field static final String APP_VERSION = "0.6.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -58,6 +59,9 @@ import java.util.concurrent.Semaphore
     ["Dashboard", "DB", "Dashboards"],
     ["^Switchboard", "SB", "Switchboard"]
 ]
+@Field static final String HUB_LABEL     = "Switchboard"               // the parent device every Switchboard device sits under
+@Field static final String PARENT_DRIVER = "Switchboard Parent"
+@Field static final String SWITCH_DRIVER = "Switchboard Switch"         // Stop All and Guest Mode switches
 @Field static final String NS          = "almulder"
 @Field static final String APP_TITLE   = "Switchboard"
 @Field static final int    LOG_MAX     = 100
@@ -290,7 +294,7 @@ private String queueStatus() {
     int qn = qNormal().size(), qu = qUrgent().size()
     long t = now()
     List playing = mapFor(BUSY).findAll { k, v -> k != "ALL" && (v.until as Long) > t && v.dni }.collect { k, v -> v.dni as String }.unique()
-    List names = playing.collect { getChildDevice(it)?.displayName ?: it }
+    List names = playing.collect { sbChild(it)?.displayName ?: it }
     String s = names ? uiPill("Playing: ${names.join(', ')}", "on") + " " : ""
     s += (qn + qu) ? uiPill("Waiting: ${qn} normal, ${qu} urgent", qu ? "warn" : "info") : (names ? "" : uiOk("Queue is empty"))
     return s
@@ -950,7 +954,7 @@ def guestEditPage(params = null) {
             input pre + "source", "enum", title: "Turned on by", submitOnChange: true, defaultValue: "create", width: 6,
                   options: [create: "Its own switch (recommended)", existing: "A switch I already have", modes: "Hub mode(s)"]
             if (src == "create") {
-                paragraph note("Switch: <b>${esc(draft && !cleanName(settings[pre + 'name'] as String) ? '(the name above)' : guestName(gid))}</b>" +(getChildDevice(gmDni(gid)) ? "" : " (created when you press Save)"))
+                paragraph note("Switch: <b>${esc(draft && !cleanName(settings[pre + 'name'] as String) ? '(the name above)' : guestName(gid))}</b>" +(sbChild(gmDni(gid)) ? "" : " (created when you press Save)"))
             } else if (src == "existing") {
                 input pre + "switch", "capability.switch", title: "Switch", required: false, width: 6
                 if (!settings[pre + "switch"]) paragraph warn("Pick a switch, or this Guest Mode can't turn on.")
@@ -1217,17 +1221,61 @@ private Map parseDni(String dni) {
     return [kind: kind, id: p[3]]
 }
 
+// ---- every Switchboard device is a child of one "Switchboard" parent device (the app's only child).
+// The parent driver creates, deletes, relabels and updates its children; the children call the parent, which calls the app.
+private String hubDni() { "SB-${app.id}-hub".toString() }
+def hubDev() { getChildDevice(hubDni()) }
+/** creates the parent device if missing; returns it */
+private def ensureHub() {
+    def h = hubDev()
+    if (h) return h
+    try {
+        h = addChildDevice(NS, PARENT_DRIVER, hubDni(), [name: HUB_LABEL, label: HUB_LABEL, isComponent: false])
+    } catch (e) {
+        log.error "${APP_TITLE}: couldn't create the '${HUB_LABEL}' parent device: ${e}"
+        state.pageErr = "Couldn't create the device \"${HUB_LABEL}\". Is the \"${PARENT_DRIVER}\" driver installed in Drivers Code? (${e.message})"
+    }
+    return h
+}
+/** one of the parent's children by DNI, or null */
+def sbChild(String dni) { hubDev()?.sbChild(dni) }
+/** creates a child under the parent device; throws if the hub refuses */
+private def sbAddChild(String driver, String dni, String label) {
+    def h = ensureHub()
+    if (!h) throw new IllegalStateException("the '${HUB_LABEL}' parent device is missing")
+    return h.sbAddChild(driver, dni, label)
+}
+/** deletes a child of the parent device; throws if the hub refuses (still used by a rule) */
+private void sbDeleteChild(String dni) { hubDev()?.sbDeleteChild(dni) }
+private void sbRelabel(def d, String label) { hubDev()?.sbRelabel(d.deviceNetworkId as String, label) }
+
+/** Switchboard Switch children (Stop All, Guest Modes) report on / off here, through the parent. Handled after the
+ *  command returns, like an event subscription would be, so the app's own on() / off() never re-enters the app. */
+void sbSwitch(String dni, String value) {
+    runInMillis(50, "sbSwitchEvent", [data: [dni: dni, value: value], overwrite: false])
+}
+void sbSwitchEvent(Map data) {
+    String dni = (data?.dni ?: "") as String
+    String v = (sbChild(dni)?.currentValue("switch") ?: data?.value ?: "") as String      // now, not when reported: a quick on / off can't land in the wrong order
+    if (dni == stopDni()) {
+        if (v == "on" && settings.stopSwitchOn != false) stopSwitchHandler(null)
+        return
+    }
+    String gid = guestIds().find { gmSrc(it as String) == "create" && gmDni(it as String) == dni } as String
+    if (gid) guestChanged(gid, v == "on")
+}
+
 /** creates the item's virtual device if missing; returns it */
 private def ensureDevice(String kind, String id, String name = null) {
     String dni = itemDni(kind, id)
-    def d = getChildDevice(dni)
+    def d = sbChild(dni)
     if (d) return d
     String label = "${KINDS[kind].label}${name ?: itemName(kind, id)}".toString()
     try {
-        d = addChildDevice(NS, KINDS[kind].driver as String, dni, [name: label, label: label, isComponent: false])
+        d = sbAddChild(KINDS[kind].driver as String, dni, label)
     } catch (e) {
         log.error "${APP_TITLE}: couldn't create '${label}': ${e}"
-        state.pageErr = "Couldn't create the device \"${label}\". Is the \"${KINDS[kind].driver}\" driver installed in Drivers Code? (${e.message})"
+        if (hubDev()) state.pageErr = "Couldn't create the device \"${label}\". Is the \"${KINDS[kind].driver}\" driver installed in Drivers Code? (${e.message})"
     }
     return d
 }
@@ -1239,7 +1287,7 @@ private void deleteItem(String kind, String id) {
     if (kind == "prof") sbStop(dni)
     if (kind == "sir") { Map so = atomicState.sirenOffAt ?: [:]; if (so.containsKey(id)) sirensOff(id, "Device deleted") }
     // device first: if the hub refuses (still used by a rule), keep the item so it can be deleted again later
-    try { if (getChildDevice(dni)) deleteChildDevice(dni) } catch (e) {
+    try { if (sbChild(dni)) sbDeleteChild(dni) } catch (e) {
         log.warn "${APP_TITLE}: couldn't delete device ${dni}: ${e}"
         state.pageErr = "Couldn't delete the device. If a rule still uses it, remove it from the rule first. (${e.message})"
         return
@@ -1259,9 +1307,9 @@ private void syncNames() {
         }
         state[KINDS[kind].stateKey as String] = m
         m.keySet().each { String id ->
-            def d = getChildDevice(itemDni(kind, id))
+            def d = sbChild(itemDni(kind, id))
             String want = deviceLabel(kind, id)
-            if (d && d.label != want) { try { d.setLabel(want) } catch (e) { logDebug "relabel ${want}: ${e}" } }
+            if (d && d.label != want) { try { sbRelabel(d, want) } catch (e) { logDebug "relabel ${want}: ${e}" } }
         }
     }
 }
@@ -1271,7 +1319,7 @@ private void ensureChildren() {
 
 private void childEvent(def child, String name, def value) {
     if (child == null || value == null) return
-    try { child.sendEvent(name: name, value: value) } catch (e) { logDebug "sendEvent ${name} on ${child}: ${e}" }
+    try { hubDev()?.sbEvent(child.deviceNetworkId as String, name, value) } catch (e) { logDebug "sendEvent ${name} on ${child}: ${e}" }
 }
 
 // ===================================================================== SOUND FILES
@@ -1326,7 +1374,7 @@ void sbSpeak(String dni, Map req) {
     Map k = parseDni(dni)
     if (!k || k.kind != "prof") { log.warn "${APP_TITLE}: speech from unknown device ${dni}"; return }
     String pid = k.id as String
-    def child = getChildDevice(dni)
+    def child = sbChild(dni)
     String devName = (child?.displayName ?: deviceLabel("prof", pid)) as String
     String cmd = (req?.cmd ?: "speak") as String
     String raw = req?.text != null ? req.text.toString() : null
@@ -1405,7 +1453,7 @@ void sbStop(String dni) {
         }
         runInMillis(1, "stopSpeakers", [overwrite: false, data: [ids: keys.findAll { byId[it] }]])
     }
-    logInfo "Stop from ${getChildDevice(dni)?.displayName ?: dni}: ${n} waiting removed" + (keys ? ", playing message stopped" : "")
+    logInfo "Stop from ${sbChild(dni)?.displayName ?: dni}: ${n} waiting removed" + (keys ? ", playing message stopped" : "")
     refreshStatus(dni)
     kickQueue()
 }
@@ -1430,7 +1478,7 @@ void sbVolume(String dni, Integer volume) {
     if (!k || k.kind != "prof") return
     Integer v = clampVol(volume)
     if (v == null) return
-    def child = getChildDevice(dni)                 // the driver already shows volume / level / mute
+    def child = sbChild(dni)                 // the driver already shows volume / level / mute
     logDebug "${child?.displayName ?: dni}: volume ${v} stored" + (settings["prof_${k.id}_volMode"] == "caller" ? " (used for its announcements)" : " (not used: profile sets its own volume)")
 }
 
@@ -1439,7 +1487,7 @@ void sbNotify(String dni, String rawText) {
     Map k = parseDni(dni)
     if (!k || k.kind != "ntf") { log.warn "${APP_TITLE}: notification from unknown device ${dni}"; return }
     String nid = k.id as String
-    def child = getChildDevice(dni)
+    def child = sbChild(dni)
     String devName = (child?.displayName ?: deviceLabel("ntf", nid)) as String
     Map pre = splitPrefix(rawText)
     String text = pre.text as String
@@ -1478,7 +1526,7 @@ void sbSiren(String dni, String mode) {
     String m = (mode ?: "off").toLowerCase()
     if (m == "on") m = "both"
     if (!(m in ["siren", "strobe", "both", "off"])) m = "off"
-    def child = getChildDevice(dni)
+    def child = sbChild(dni)
     String devName = (child?.displayName ?: deviceLabel("sir", rid)) as String
     String logId = newLogId()
     Map entry = [id: logId, t: now(), dev: devName, dni: dni, kind: "siren", text: m, outcome: "", source: ""]
@@ -1766,7 +1814,7 @@ private void sirensOff(String rid, String why) {
     sirenCommand(rid, "off")
     sirenOffAtSet(rid, null)
     String dni = itemDni("sir", rid)
-    def child = getChildDevice(dni)
+    def child = sbChild(dni)
     childEvent(child, "alarm", "off"); childEvent(child, "switch", "off"); childEvent(child, "lastMessage", why)
     addLog([id: newLogId(), t: now(), dev: (child?.displayName ?: deviceLabel("sir", rid)) as String, dni: dni, kind: "siren", text: "off", outcome: why, source: APP_TITLE])
     scheduleSirenCheck()
@@ -1807,7 +1855,7 @@ void stopAll(String why) {
     Map so = (atomicState.sirenOffAt ?: [:]) as Map
     int sirens = 0
     ids("sir").each { String rid ->
-        def child = getChildDevice(itemDni("sir", rid))
+        def child = sbChild(itemDni("sir", rid))
         String al = child ? (child.currentValue("alarm") ?: "off") as String : "off"
         boolean sounding = so.containsKey(rid) || al != "off" || child?.currentValue("switch") == "on"
         if (!sounding) return
@@ -1866,21 +1914,18 @@ void hsmStopAlertHandler(evt) {
 }
 
 private String stopDni() { "SB-${app.id}-stopall".toString() }
-/** creates (and subscribes) or deletes the Stop All switch to match the setting (initialize) */
+/** creates or deletes the Stop All switch to match the setting (initialize) */
 private void syncStopSwitch() {
     String dni = stopDni()
-    def d = getChildDevice(dni)
+    def d = sbChild(dni)
     if (settings.stopSwitchOn != false) {
         if (!d) {
-            try { d = addChildDevice("hubitat", "Virtual Switch", dni, [name: STOP_LABEL, label: STOP_LABEL, isComponent: false]) }
-            catch (e) { log.error "${APP_TITLE}: couldn't create the '${STOP_LABEL}' switch: ${e}"; state.pageErr = "Couldn't create the switch \"${STOP_LABEL}\". (${e.message})" }
+            try { d = sbAddChild(SWITCH_DRIVER, dni, STOP_LABEL) }
+            catch (e) { log.error "${APP_TITLE}: couldn't create the '${STOP_LABEL}' switch: ${e}"; if (hubDev()) state.pageErr = "Couldn't create the switch \"${STOP_LABEL}\". (${e.message})" }
         }
-        if (d) {
-            subscribe(d, "switch.on", "stopSwitchHandler")
-            if (d.currentValue("switch") == "on") runIn(2, "stopSwitchReset")
-        }
+        if (d && d.currentValue("switch") == "on") runIn(2, "stopSwitchReset")      // its on / off arrive through sbSwitch
     } else if (d) {
-        try { deleteChildDevice(dni) } catch (e) {
+        try { sbDeleteChild(dni) } catch (e) {
             log.warn "${APP_TITLE}: couldn't delete the '${STOP_LABEL}' switch: ${e}"
             state.pageErr = "Couldn't delete the \"${STOP_LABEL}\" switch. If a rule or dashboard uses it, remove it there first. (${e.message})"
         }
@@ -1891,7 +1936,7 @@ void stopSwitchHandler(evt) {
     runIn(2, "stopSwitchReset")
 }
 void stopSwitchReset() {
-    def d = getChildDevice(stopDni())
+    def d = sbChild(stopDni())
     if (d && d.currentValue("switch") == "on") { try { d.off() } catch (e) { log.warn "${APP_TITLE}: couldn't turn off '${STOP_LABEL}': ${e}" } }
 }
 
@@ -2070,7 +2115,7 @@ private Long rowTime(Map r) {
 }
 private void applySource(Map data, String src) {
     logSet(data?.logId as String, [source: src])
-    def child = data?.dni ? getChildDevice(data.dni as String) : null
+    def child = data?.dni ? sbChild(data.dni as String) : null
     childEvent(child, "lastSource", src)
 }
 
@@ -2170,7 +2215,7 @@ private String gmSrc(String gid) { (settings["gm_${gid}_source"] ?: "create") as
 /** the switch behind a Guest Mode (null for hub modes) */
 def gmDevice(String gid) {
     String s = gmSrc(gid)
-    return s == "create" ? getChildDevice(gmDni(gid)) : (s == "existing" ? settings["gm_${gid}_switch"] : null)
+    return s == "create" ? sbChild(gmDni(gid)) : (s == "existing" ? settings["gm_${gid}_switch"] : null)
 }
 Boolean isGuestOn(String gid) {
     if (!(state.guests ?: [:]).containsKey(gid) || isDraft("gm", gid)) return false
@@ -2220,8 +2265,8 @@ private void deleteGuest(String gid) {
     Map g = (state.guests ?: [:]) as Map
     if (!g.containsKey(gid)) return
     // switch first: if the hub refuses (still used by a rule), keep the Guest Mode so it can be deleted again later
-    if (getChildDevice(gmDni(gid))) {
-        try { deleteChildDevice(gmDni(gid)) } catch (e) { state.gmErr = "Couldn't delete its switch. If a rule uses it, remove it there first. (${e.message})"; return }
+    if (sbChild(gmDni(gid))) {
+        try { sbDeleteChild(gmDni(gid)) } catch (e) { state.gmErr = "Couldn't delete its switch. If a rule uses it, remove it there first. (${e.message})"; return }
     }
     g.remove(gid); state.guests = g
     Map off = (state.gmOffAt ?: [:]) as Map; off.remove(gid); state.gmOffAt = off
@@ -2243,17 +2288,17 @@ private void syncGuests() {
 
 /** Switchboard's own Guest Mode virtual switches (normal, non-component), labelled with the mode's name */
 private void ensureGuestSwitch(String gid) {
-    def d = getChildDevice(gmDni(gid))
+    def d = sbChild(gmDni(gid))
     String label = guestName(gid)
     if (gmSrc(gid) == "create") {
         if (!d) {
-            try { addChildDevice("hubitat", "Virtual Switch", gmDni(gid), [name: label, label: label, isComponent: false]) }
+            try { sbAddChild(SWITCH_DRIVER, gmDni(gid), label) }
             catch (e) { log.error "${APP_TITLE}: couldn't create the '${label}' switch: ${e}"; state.gmErr = "Couldn't create the switch \"${label}\". (${e.message})" }
         } else if (d.label != label) {
-            try { d.setLabel(label) } catch (e) { logDebug "relabel ${label}: ${e}" }
+            try { sbRelabel(d, label) } catch (e) { logDebug "relabel ${label}: ${e}" }
         }
     } else if (d) {
-        try { deleteChildDevice(gmDni(gid)) } catch (e) { log.warn "${APP_TITLE}: couldn't delete the unused '${label}' switch: ${e}" }
+        try { sbDeleteChild(gmDni(gid)) } catch (e) { log.warn "${APP_TITLE}: couldn't delete the unused '${label}' switch: ${e}" }
     }
 }
 private void ensureGuestSwitches() {
@@ -2271,7 +2316,7 @@ private void initGuests() {
 /** returns true when this mode follows hub modes (needs the location subscription) */
 private boolean initGuest(String gid) {
     boolean hub = gmSrc(gid) == "modes"
-    if (!hub) { def d = gmDevice(gid); if (d) subscribe(d, "switch", "guestSwitchHandler") }
+    if (gmSrc(gid) == "existing") { def d = gmDevice(gid); if (d) subscribe(d, "switch", "guestSwitchHandler") }   // created switches report through sbSwitch
     boolean on = isGuestOn(gid)
     Map was = (state.gmWasOn ?: [:]) as Map; was[gid] = on; state.gmWasOn = was
     Map off = (state.gmOffAt ?: [:]) as Map
@@ -2601,7 +2646,7 @@ private List resolveSpeakers(Map item) {
 /** status / queueLength attributes of a Switchboard speaker device */
 private void refreshStatus(String dni) {
     if (!dni) return
-    def child = getChildDevice(dni)
+    def child = sbChild(dni)
     if (!child) return
     long t = now()
     int n = (new ArrayList<Map>(qUrgent()) + new ArrayList<Map>(qNormal())).count { it.dni == dni } as int
@@ -2619,7 +2664,7 @@ private Integer itemVolume(Map item) {
     if (vm == "fixed") v = intSet("prof_${pid}_fixedVol", 60)
     else if (vm == "caller") {
         v = item.callerVolume != null ? item.callerVolume as Integer : null
-        if (v == null && item.dni) v = toInt(getChildDevice(item.dni as String)?.currentValue("volume"))
+        if (v == null && item.dni) v = toInt(sbChild(item.dni as String)?.currentValue("volume"))
     } else v = isNight() ? intSet("prof_${pid}_nightVol", 40) : intSet("prof_${pid}_dayVol", 70)
     return clampVol(v)
 }
@@ -2632,7 +2677,7 @@ private long playItem(Map item, List devs, boolean urgent) {
     List parts = (item.parts ?: []) as List
     Integer vol = itemVolume(item)
     if (((item.step ?: 0) as Integer) == 0 && item.dni) {
-        def child = getChildDevice(item.dni as String)
+        def child = sbChild(item.dni as String)
         childEvent(child, "status", "playing")
     }
     while (((item.step ?: 0) as Integer) < parts.size()) {
@@ -2934,8 +2979,10 @@ void initialize() {
     unschedule()
     state.remove("hubCookie"); state.remove("hubCookieAt")      // the hub login is gone (0.5.0)
     cleanDrafts()
-    ensureGuestSwitches()
-    ensureChildren()
+    if (ensureHub()) {                     // no parent device → its error is on the page; don't try (and fail) every device
+        ensureGuestSwitches()
+        ensureChildren()
+    } else syncGuests()
 
     subscribe(location, "systemStart", "hubRestarted")
 
@@ -2990,6 +3037,8 @@ void uninstalled() {
     new ArrayList<String>(UKEYS).each { if (it.startsWith(pre)) UKEYS.remove(it) }
     new ArrayList<String>(LAST_RESTORED.keySet()).each { if (it.startsWith(pre2)) LAST_RESTORED.remove(it) }
     new ArrayList<String>(TM_RECENT.keySet()).each { if (it.contains("|${app.id}|")) TM_RECENT.remove(it) }
+    def h = hubDev()
+    ((h?.sbChildren() ?: []) as List).each { try { h.sbDeleteChild(it.deviceNetworkId as String) } catch (e) { log.warn "${APP_TITLE}: couldn't delete ${it.displayName}: ${e}" } }
     getChildDevices().each { try { deleteChildDevice(it.deviceNetworkId) } catch (e) { log.warn "${APP_TITLE}: couldn't delete ${it.displayName}: ${e}" } }
 }
 
