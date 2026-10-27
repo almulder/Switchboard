@@ -2334,7 +2334,7 @@ private boolean gmGuest(String gid) { (settings["gm_${gid}_type"] ?: "guest") !=
 private String gmBase(String gid) {
     String raw = cleanName(settings["gm_${gid}_name"] as String) ?: ((state.guests ?: [:])[gid]?.name ?: "") as String
     String n = raw.replaceAll(/(?i)\s*-\s*SB\s*$/, "").trim()
-    if (gmGuest(gid)) n = n.replaceAll(/(?i)^guest\s*mode\s*[,:\-]?\s*/, "").trim()
+    if (gmGuest(gid)) n = n.replaceAll(/(?i)^guest\s*mode\b\s*[,:\-]?\s*/, "").trim()
     return n ?: raw
 }
 /** "Guest Mode, Lily" or "Yard Work" */
