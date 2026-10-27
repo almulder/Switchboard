@@ -256,6 +256,10 @@ Order per profile item: chime → sound/track → text; busy time = sound secs o
 Track playback: `playTrackAndRestore(url, vol)` if supported, else set volume + `playTrack(url)` and restore after
 `secs`. A `playTrack(uri)` from a rule whose uri matches a library sound uses that sound's length; otherwise
 `defaultTrackSecs` (Settings, default 10).
+**Play sounds without restore (0.7.3, per speaker, `spkPlain_<id>`):** skips `playTrackAndRestore` and uses the
+setVolume + `playTrack` path. Found on a Sonos S1 Connect:Amp (Hubitat's Sonos Player 2 driver): after
+`playTrackAndRestore`, the next `speak` came out 1–2 minutes late; after plain `playTrack` it came out on time.
+S2 speakers were fine either way. Cost: music playing on that speaker stops instead of resuming.
 
 **Real track length (0.5.0):** every track / sound part that starts on real speakers (`playTrackOn`) schedules
 `trackLengthCheck` 2 s later (`runInMillis`, `overwrite: false`, data: speaker ids, sent / start time, assumed secs,

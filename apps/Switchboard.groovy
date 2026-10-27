@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.7.3 - 2026-10-27 - Per-speaker "Play sounds without restore" (Speakers & queue): for speakers such as Sonos S1 that hold up
+ *                       the next message for minutes after playTrackAndRestore. Sounds then use setVolume + playTrack.
  *  0.7.2 - 2026-10-27 - Deleting an item whose device was missing clears "(1 device missing)" right away;
  *                       Save re-checks too.
  *  0.7.1 - 2026-10-26 - Leftover cleanup also removes the empty settings of deleted items (blank times, empty device lists).
@@ -47,7 +49,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.7.2"
+@Field static final String APP_VERSION = "0.7.3"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -876,6 +878,9 @@ def speakersPage(params = null) {
                       defaultValue: 0, width: 4
                 input "spkSetDelay_${id}", "number", title: "Delay between setVolume and speak (ms)", defaultValue: 700, width: 4
                 input "spkRestore_${id}", "bool", title: "Restore previous volume afterwards", defaultValue: true, width: 4
+                if (dev.hasCommand("playTrackAndRestore") && dev.hasCommand("playTrack"))
+                    input "spkPlain_${id}", "bool", title: "Play sounds without restore" + tip("Turn on if a message after a chime or sound is late by a minute or more (seen on Sonos S1). Sounds then use plain playTrack: music playing on this speaker stops instead of resuming."),
+                          defaultValue: false, width: 8
                 input "btnTest_${id}", "button", title: "Test this speaker"
             }
         }
@@ -2805,8 +2810,8 @@ private long playItem(Map item, List devs, boolean urgent) {
 }
 
 /**
- * Play a sound file: playTrackAndRestore(url, vol) where the driver has it, otherwise
- * setVolume + playTrack(url) (the volume is restored once the speaker is done). Returns 0 if nothing played.
+ * Play a sound file: playTrackAndRestore(url, vol) where the driver has it (unless the speaker is set to play sounds
+ * without restore), otherwise setVolume + playTrack(url) (the volume is restored once the speaker is done). Returns 0 if nothing played.
  */
 private long playTrackOn(Map item, String url, Integer secs, String name, List devs, Integer vol) {
     if (!url) return 0L
@@ -2814,7 +2819,7 @@ private long playTrackOn(Map item, String url, Integer secs, String name, List d
     List played = [], later = []
     devs.each { dev ->
         try {
-            if (dev.hasCommand("playTrackAndRestore")) {
+            if (dev.hasCommand("playTrackAndRestore") && (settings["spkPlain_${dev.id}"] != true || !dev.hasCommand("playTrack"))) {
                 if (vol != null) dev.playTrackAndRestore(url, vol)
                 else dev.playTrackAndRestore(url)
                 played << dev
