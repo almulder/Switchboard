@@ -200,7 +200,7 @@ the name and some wording ("Guests leave on" vs "Ends on"); both behave the same
 `state.guests` id → [name]. Code keys still say guest / gm. Added with "Add new Mode" like the other lists; its switch is
 created on Save. Delete on its edit page (confirm).
 Per mode `<id>`:
-- `gm_<id>_type` guest (default) / other;
+- `gm_<id>_type` other (default: a plain mode) / guest;
 - `gm_<id>_name` — just the name ("Lily", "All", "Yard Work"). Shown as "Guest Mode, Lily" or "Yard Work"; its own
   switch is labelled "Guest Mode, Lily - SB" or "Yard Work - SB". A typed " - SB" (and, for Guest modes, a leading
   "Guest Mode") is dropped from the name so it isn't doubled. Renaming or changing the kind relabels the switch;

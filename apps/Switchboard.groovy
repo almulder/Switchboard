@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.8.1 - 2026-10-27 - A mode is a plain mode unless you set it to Guest (was: Guest unless set to Other).
  *  0.8.0 - 2026-10-27 - Guest Modes are now Modes, each a Guest mode or an Other mode. Switches are named for you:
  *                       "Guest Mode, Lily - SB" or "Yard Work - SB" (type only the name).
  *  0.7.5 - 2026-10-27 - A sound's length can be a decimal (e.g. 1.5 s). A speaker's whole-second report no longer overrides
@@ -55,7 +56,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.8.0"
+@Field static final String APP_VERSION = "0.8.1"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -996,7 +997,7 @@ def guestEditPage(params = null) {
                     else input "btnGmOn_${gid}", "button", title: "Turn on", width: 3
                 }
             }
-            input pre + "type", "enum", title: "Kind of mode", submitOnChange: true, defaultValue: "guest", width: 6,
+            input pre + "type", "enum", title: "Kind of mode", submitOnChange: true, defaultValue: "other", width: 6,
                   options: [guest: "Guest mode (a visit)", other: "Other mode (yard work, cleaning…)"]
             input pre + "name", "text", title: "Name" + tip(gmGuest(gid) ? "Just the guest, e.g. Lily or All. The switch is named \"Guest Mode, Lily - SB\"; renaming renames it." :
                                                                    "E.g. Yard Work. The switch is named \"Yard Work - SB\"; renaming renames it."),
@@ -2329,7 +2330,7 @@ List<String> guestIds() {
     return liveKeys(g).sort { a, b -> guestName(a as String).toLowerCase() <=> guestName(b as String).toLowerCase() } as List
 }
 /** Guest mode or other mode (only the name and some wording differ) */
-private boolean gmGuest(String gid) { (settings["gm_${gid}_type"] ?: "guest") != "other" }
+private boolean gmGuest(String gid) { settings["gm_${gid}_type"] == "guest" }
 /** the name as typed, without the "Guest Mode," or " - SB" Switchboard adds itself */
 private String gmBase(String gid) {
     String raw = cleanName(settings["gm_${gid}_name"] as String) ?: ((state.guests ?: [:])[gid]?.name ?: "") as String
