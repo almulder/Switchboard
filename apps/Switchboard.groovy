@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.8.2 - 2026-10-27 - The main page no longer lists every mode with on/off buttons (use the Modes page; modes that are on still show at the top).
  *  0.8.1 - 2026-10-27 - A mode is a plain mode unless you set it to Guest (was: Guest unless set to Other).
  *  0.8.0 - 2026-10-27 - Guest Modes are now Modes, each a Guest mode or an Other mode. Switches are named for you:
  *                       "Guest Mode, Lily - SB" or "Yard Work - SB" (type only the name).
@@ -56,7 +57,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.8.1"
+@Field static final String APP_VERSION = "0.8.2"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -278,17 +279,6 @@ def mainPage(params = null) {
             } else {
                 paragraph uiPill("Test Mode off", "info")
                 href "testPage", title: "Turn on Test Mode…", description: "Confirm the warning on the Test Mode page"
-            }
-            if (!guestIds()) paragraph note("No modes yet.")
-            guestIds().each { String gid ->
-                boolean on = isGuestOn(gid)
-                Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
-                paragraph (on ? uiPill("${guestName(gid)} ON", "info") + (end ? " " + note("until ${fmtTime(end)}") : "")
-                              : uiPill("${guestName(gid)} off", "off"))
-                if (gmSrc(gid) != "modes") {
-                    if (on) input "btnGmOff_${gid}", "button", title: "Turn off", width: 4
-                    else input "btnGmOn_${gid}", "button", title: "Turn on", width: 4
-                }
             }
             paragraph queueStatus()
             input "btnStopAll", "button", title: "Stop all now", width: 4

@@ -99,9 +99,10 @@ Capabilities: `Actuator`, `Alarm`, `Switch`. `siren()`, `strobe()`, `both()`, `o
 
 ## 3. App pages
 
-Main page (status first): Test Mode / Guest Mode pills with on/off buttons, queue status, last 10 log lines, then
+Main page (status first): Test Mode pill and button, queue status, last 10 log lines (modes that are on show as
+header pills; their on/off buttons are on each mode's page, not the main page since 0.8.2), then
 links: **Announcement Profiles**, **Notifications**, **Sirens**, **Sound files**, **Speakers & queue**,
-**Test Mode**, **Guest Mode**, **Message log**, **Settings**. Reuse Rule Forge's UI kit (`uiCss`, `uiHeader`, ⓘ tips
+**Test Mode**, **Modes**, **Message log**, **Settings**. Reuse Rule Forge's UI kit (`uiCss`, `uiHeader`, ⓘ tips
 via fixed-position CSS tooltip, pills). Plain short wording, detail in tips.
 
 ### Setup lists and edit pages (Announcement Profiles, Notifications, Sirens, Sound files, Guest Modes)
