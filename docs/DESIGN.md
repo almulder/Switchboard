@@ -33,6 +33,22 @@ DNIs: `SB-<appId>-spk-<id>`, `SB-<appId>-ntf-<id>`, `SB-<appId>-snd-<id>` (siren
 Labels: "Announce – <profile name>", "Notify – <name>", "Siren – <name>"; renaming in the app relabels the device.
 Deleting an item in the app deletes its device (with a confirm link). `uninstalled()` deletes the parent's children, then the parent.
 
+**Missing devices (0.7.0, Albert):** a device deleted outside Switchboard (Devices page) is never re-created on its own
+(not on Done, not after a reboot). Devices are created only when a new item is saved, or by **Recreate**.
+- Missing = a saved profile / notifier / siren with no device; a Guest Mode (source "create") whose switch was made
+  once (`state.guests[gid].made`) and is gone; the Stop All switch when the option is on and it was made once
+  (`state.stopMade`).
+- Shown: a warning on the main page listing them, each linking to its page (Stop All → Settings), plus "Recreate all"
+  when there are several; a red "device missing" pill on list rows; on the item's page a warning with **Recreate
+  device / switch** (Delete is at the bottom as usual); the app's name in the Apps list gets
+  `<span class='sb-missing' style='color:#d92d20'>(N devices missing)</span>` (`app.updateLabel`, refreshed on
+  initialize, main page render, Recreate, and ~3 s after a child is deleted).
+- Recreate makes a NEW device (new id): rules must be pointed at it again and it must be ticked in webCoRE.
+- Every child driver's `uninstalled()` calls `parent.sbChildRemoved(dni)`; the parent passes it to the app.
+
+**Leftover settings:** `initialize()` removes `<kind>_<id>_*` settings whose id isn't in that kind's state map
+(drafts included), e.g. a deleted Guest Mode's name re-saved by its open page right after Delete.
+
 **Stop All switch:** when `stopSwitchOn` is on (default), Switchboard also creates a normal (non-component) child
 switch (driver "Switchboard Switch", DNI `SB-<appId>-stopall`, label "Switchboard – Stop All") for
 dashboards, buttons and voice. Turning it on runs Stop all (§4) and Switchboard turns it back off after ~2 s.

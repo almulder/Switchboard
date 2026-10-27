@@ -18,12 +18,13 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.1 - 2026-10-26 - Passes on when a child (or this device) is deleted, so the app can show it as missing.
  *  0.1.0 - 2026-10-26 - Initial build.
  */
 
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.1.0"
+@Field static final String DRIVER_VERSION = "0.1.1"
 @Field static final String NS = "almulder"
 
 metadata {
@@ -37,6 +38,10 @@ metadata {
 
 def installed() {
     log.info "${device.displayName}: installed (Switchboard Parent ${DRIVER_VERSION})"
+}
+
+def uninstalled() {
+    try { parent?.sbChildRemoved(device.deviceNetworkId) } catch (ignored) { }    // all its children are gone too
 }
 
 def updated() {
@@ -58,6 +63,7 @@ def sbVolume(String dni, Integer v)   { toApp("sbVolume") { it.sbVolume(dni, v) 
 def sbNotify(String dni, String text) { toApp("sbNotify") { it.sbNotify(dni, text) } }
 def sbSiren(String dni, String mode)  { toApp("sbSiren")  { it.sbSiren(dni, mode) } }
 def sbSwitch(String dni, String v)    { toApp("sbSwitch") { it.sbSwitch(dni, v) } }
+def sbChildRemoved(String dni)        { toApp("sbChildRemoved") { it.sbChildRemoved(dni) } }
 
 private void toApp(String what, Closure c) {
     def p = parent

@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.7.0 - 2026-10-26 - A Switchboard device deleted outside the app is no longer re-created on its own: it shows as missing (main page, its list and page, and "(1 device missing)" after the app's name in the Apps list) with Recreate or Delete. Leftover settings of deleted items are cleaned up.
  *  0.6.0 - 2026-10-26 - Every Switchboard device (Announce, Notify, Siren, Guest Mode and Stop All switches) is now a child of one "Switchboard" parent device. Needs the Switchboard Parent and Switchboard Switch drivers.
  *  0.5.0 - 2026-10-26 - One sound dropdown (hub files + web address); real track length from the speaker; hub login removed (not needed).
  *  0.4.3 - 2026-10-26 - Picking a hub sound file sets its estimated length; deleting a new item shows "Deleted" instead of opening another blank one.
@@ -43,7 +44,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.6.0"
+@Field static final String APP_VERSION = "0.7.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -244,6 +245,18 @@ def mainPage(params = null) {
             paragraph uiCss() + uiHeader(APP_TITLE, "v${APP_VERSION} · announcements, notifications and sirens", modePills())
             if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
             if (state.gmErr) { paragraph warn(state.gmErr as String); state.remove("gmErr") }
+            if (state.okMsg) { paragraph uiOk(state.okMsg as String); state.remove("okMsg") }
+            List<Map> miss = missingDevices()
+            refreshMissing(miss)
+            if (miss) {
+                paragraph warn("${plural(miss.size(), 'Switchboard device')} missing: <b>${esc(miss.collect { it.label }.join(', '))}</b>. " +
+                               "Deleted outside Switchboard (or couldn't be created), so rules using ${miss.size() == 1 ? 'it' : 'them'} no longer reach Switchboard. Open each one to recreate or delete it.")
+                miss.each { Map m ->
+                    if (m.kind == "stop") href name: "hrefMiss_stop", page: "settingsPage", title: "⚠ ${esc(m.label as String)}", description: "Recreate it, or turn the Stop All switch off"
+                    else href name: "hrefMiss_${m.kind}_${m.id}", page: EDITS[m.kind as String].edit as String, params: [id: m.id], title: "⚠ ${esc(m.label as String)}", description: "Recreate or delete"
+                }
+                if (miss.size() > 1) input "btnRecreateAll", "button", title: "Recreate all", width: 4
+            }
         }
         section(uiTitle(null, "Right now")) {
             if (isTestMode()) {
@@ -428,6 +441,13 @@ private boolean editHead(String kind, String id) {
         } else if (draft) {
             paragraph uiHint("New and not saved yet. Fill it in, then press <b>Save</b> (or <b>Next</b>) at the bottom.")
         }
+        if (id && state.okMsg) { paragraph uiOk(state.okMsg as String); state.remove("okMsg") }
+        if (id && isMissing(kind, id)) {
+            String dev = kind == "gm" ? "switch" : "device"
+            paragraph warn("Its ${dev} <b>${esc(kind == 'gm' ? guestName(id) : deviceLabel(kind, id))}</b> is missing (deleted outside Switchboard, or it couldn't be created). " +
+                           "Rules that used it no longer reach Switchboard. Recreate it (a new ${dev}: point your rules at it again), or delete this ${e.what} at the bottom.")
+            input "btnRecreate_${kind}_${id}", "button", title: "Recreate ${dev}", width: 4
+        }
     }
     return id != null
 }
@@ -451,6 +471,7 @@ private void editFoot(String kind, String id) {
 }
 /** list page row: opens the item's edit page */
 private void editRow(String kind, String id, String title, String desc) {
+    if (isMissing(kind, id)) title += " " + uiPill("device missing", "off")
     href name: "hrefEdit_${kind}_${id}", page: EDITS[kind].edit as String, params: [id: id], title: title, description: desc
 }
 /** list page "Add new …": opens the edit page on a new draft */
@@ -1099,6 +1120,8 @@ def settingsPage(params = null) {
     dynamicPage(name: "settingsPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("Settings", "${APP_TITLE} · Setup")
+            if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
+            if (state.okMsg) { paragraph uiOk(state.okMsg as String); state.remove("okMsg") }
         }
         section(uiTitle(null, "Night time")) {
             input "nightStart", "time", title: "Night starts" + tip("Profiles set to Day / night volume use their night volume between these times. Blank = 9:00 PM."), required: false, width: 4
@@ -1113,6 +1136,10 @@ def settingsPage(params = null) {
             input "stopOnDisarm", "bool", title: "When Safety Monitor is disarmed or cancels its alert, stop all sirens and sounds" +
                   tip("Turns off every Switchboard siren, stops speakers playing an urgent message or a sound, and drops waiting sounds and urgent messages. Normal spoken messages (e.g. 'System disarmed') still play."),
                   defaultValue: true
+            if (isMissing("stop", "")) {
+                paragraph warn("The <b>${esc(STOP_LABEL)}</b> switch is missing (deleted outside Switchboard, or it couldn't be created). Recreate it, or turn the option below off.")
+                input "btnRecreate_stop", "button", title: "Recreate switch", width: 4
+            }
             input "stopSwitchOn", "bool", title: "Create a '${STOP_LABEL}' switch for dashboards, buttons and voice" +
                   tip("Turning the switch on stops everything like the 'Stop all now' button; it turns itself back off after 2 seconds."),
                   defaultValue: true
@@ -1146,6 +1173,12 @@ void appButtonHandler(String btn) {
         case "btnTmOn":     turnTestModeOn(); return
         case "btnTmOff":    turnTestModeOff("Test Mode is OFF. Announcements, notifications and sirens are back to normal."); return
         case "btnStopAll":  stopAll("Stop all button"); return
+        case "btnRecreateAll": recreateAll(); return
+    }
+    if (btn.startsWith("btnRecreate_")) {
+        List p = (btn - "btnRecreate_").split("_", 2) as List
+        recreateDevice(p[0] as String, p.size() > 1 ? p[1] as String : "")
+        return
     }
     if (btn.startsWith("btnGmOn_"))    { guestOn(btn - "btnGmOn_", false); return }
     if (btn.startsWith("btnGmUntil_")) { guestOn(btn - "btnGmUntil_", true); return }
@@ -1265,6 +1298,62 @@ void sbSwitchEvent(Map data) {
     if (gid) guestChanged(gid, v == "on")
 }
 
+// ---- missing devices: a saved item whose device is gone (deleted outside Switchboard, or couldn't be created).
+// Switchboard never re-creates one on its own: its page offers Recreate or Delete, and the app's name in the Apps list
+// shows "(1 device missing)" until it's sorted out.
+@Field static final String MISSING_TAG = "sb-missing"
+
+/** a child device was deleted (reported by its driver through the parent): update the warning once the hub is done */
+void sbChildRemoved(String dni) { runIn(3, "refreshMissing") }
+
+/** [kind, id, label] of every missing device; kind "stop" is the Stop All switch */
+List<Map> missingDevices() {
+    List<Map> out = []
+    Set<String> have = childDnis()
+    KINDS.keySet().each { String kind -> ids(kind).each { String id -> if (isMissing(kind, id, have)) out << [kind: kind, id: id, label: deviceLabel(kind, id)] } }
+    guestIds().each { String gid -> if (isMissing("gm", gid, have)) out << [kind: "gm", id: gid, label: guestName(gid)] }
+    if (isMissing("stop", "", have)) out << [kind: "stop", id: "", label: STOP_LABEL]
+    return out
+}
+/** DNIs of the parent's children, read once (each sbChild is a call into the parent driver) */
+private Set<String> childDnis() { (((hubDev()?.sbChildren() ?: []) as List).collect { it.deviceNetworkId as String }) as Set }
+boolean isMissing(String kind, String id, Set<String> have = null) {
+    if (have == null) have = childDnis()
+    if (kind == "stop") return settings.stopSwitchOn != false && state.stopMade == true && !have.contains(stopDni())
+    if (kind == "gm") return rawMap("gm").containsKey(id) && !isDraft("gm", id) && gmSrc(id) == "create" && gmMade(id) && !have.contains(gmDni(id))
+    return KINDS[kind] != null && rawMap(kind).containsKey(id) && !isDraft(kind, id) && !have.contains(itemDni(kind, id))
+}
+/** the app's name in the Apps list: "Switchboard (1 device missing)" in red while any are missing */
+void refreshMissing(List<Map> miss = null) {
+    int n = (miss != null ? miss : missingDevices()).size()
+    String base = ((app.label ?: APP_TITLE) as String).replaceAll(/(?s)\s*<span[^>]*sb-missing.*$/, "").trim() ?: APP_TITLE
+    String want = n ? "${base} <span class='${MISSING_TAG}' style='color:#d92d20'>(${plural(n, 'device')} missing)</span>".toString() : base
+    if (app.label != want) app.updateLabel(want)
+}
+/** Recreate button: a new device for the item. It gets a new id, so rules that used the old one must be pointed at it again. */
+private void recreateDevice(String kind, String id, boolean one = true) {
+    def d
+    String label
+    if (kind == "stop") { d = createStopSwitch(); label = STOP_LABEL }
+    else if (kind == "gm") { ensureGuestSwitch(id, true, true); d = sbChild(gmDni(id)); label = guestName(id); if (d) initGuests() }
+    else if (KINDS[kind]) { d = ensureDevice(kind, id); label = deviceLabel(kind, id) }
+    if (d) {
+        if (one) state.okMsg = "Recreated \"${label}\". It's a new device: point the rules that used the old one at it again" +
+                               " (and tick it in webCoRE's available devices)."
+        logInfo "Recreated the missing device '${label}'"
+    }
+    if (one) refreshMissing()
+}
+private void recreateAll() {
+    List<Map> miss = missingDevices()
+    miss.each { recreateDevice(it.kind as String, it.id as String, false) }
+    List<Map> left = missingDevices()
+    List done = (miss.collect { it.label } - left.collect { it.label })
+    if (done) state.okMsg = "Recreated ${done.join(', ')}. They're new devices: point the rules that used the old ones at them again" +
+                            " (and tick them in webCoRE's available devices)."
+    refreshMissing(left)
+}
+
 /** creates the item's virtual device if missing; returns it */
 private def ensureDevice(String kind, String id, String name = null) {
     String dni = itemDni(kind, id)
@@ -1297,7 +1386,7 @@ private void deleteItem(String kind, String id) {
     removeItemSettings(kind, id)
 }
 
-/** names from settings → state, relabel devices, re-create missing ones */
+/** names from settings → state, relabel devices (missing ones are left for Recreate) */
 private void syncNames() {
     KINDS.keySet().each { String kind ->
         Map m = itemMap(kind)
@@ -1312,9 +1401,6 @@ private void syncNames() {
             if (d && d.label != want) { try { sbRelabel(d, want) } catch (e) { logDebug "relabel ${want}: ${e}" } }
         }
     }
-}
-private void ensureChildren() {
-    KINDS.keySet().each { String kind -> ids(kind).each { String id -> ensureDevice(kind, id) } }
 }
 
 private void childEvent(def child, String name, def value) {
@@ -1919,17 +2005,24 @@ private void syncStopSwitch() {
     String dni = stopDni()
     def d = sbChild(dni)
     if (settings.stopSwitchOn != false) {
-        if (!d) {
-            try { d = sbAddChild(SWITCH_DRIVER, dni, STOP_LABEL) }
-            catch (e) { log.error "${APP_TITLE}: couldn't create the '${STOP_LABEL}' switch: ${e}"; if (hubDev()) state.pageErr = "Couldn't create the switch \"${STOP_LABEL}\". (${e.message})" }
-        }
+        if (!d && state.stopMade != true) d = createStopSwitch()        // made once; deleted later = missing (Recreate)
+        if (d) state.stopMade = true
         if (d && d.currentValue("switch") == "on") runIn(2, "stopSwitchReset")      // its on / off arrive through sbSwitch
-    } else if (d) {
-        try { sbDeleteChild(dni) } catch (e) {
+    } else if (!d) {
+        state.remove("stopMade")
+    } else {
+        try { sbDeleteChild(dni); state.remove("stopMade") } catch (e) {
             log.warn "${APP_TITLE}: couldn't delete the '${STOP_LABEL}' switch: ${e}"
             state.pageErr = "Couldn't delete the \"${STOP_LABEL}\" switch. If a rule or dashboard uses it, remove it there first. (${e.message})"
         }
     }
+}
+private def createStopSwitch() {
+    def d = null
+    try { d = sbAddChild(SWITCH_DRIVER, stopDni(), STOP_LABEL) }
+    catch (e) { log.error "${APP_TITLE}: couldn't create the '${STOP_LABEL}' switch: ${e}"; if (hubDev()) state.pageErr = "Couldn't create the switch \"${STOP_LABEL}\". (${e.message})" }
+    if (d) state.stopMade = true
+    return d
 }
 void stopSwitchHandler(evt) {
     stopAll("Stop All switch")
@@ -2286,24 +2379,39 @@ private void syncGuests() {
     state.guests = g
 }
 
-/** Switchboard's own Guest Mode virtual switches (normal, non-component), labelled with the mode's name */
-private void ensureGuestSwitch(String gid) {
+/** true once Switchboard has made (or seen) this Guest Mode's switch; a made switch that's gone is "missing" */
+private boolean gmMade(String gid) { (((state.guests ?: [:]) as Map)[gid] as Map)?.made == true }
+private void setGmMade(String gid, boolean on) {
+    Map g = (state.guests ?: [:]) as Map
+    if (!(g[gid] instanceof Map) || ((g[gid].made == true) == on)) return
+    if (on) g[gid].made = true else g[gid].remove("made")
+    state.guests = g
+}
+
+/** Switchboard's own Guest Mode virtual switches (normal, non-component), labelled with the mode's name.
+ *  Makes the switch only the first time (Save, Done); once made, a deleted switch is "missing" until Recreate (force). */
+private void ensureGuestSwitch(String gid, boolean create = true, boolean force = false) {
     def d = sbChild(gmDni(gid))
     String label = guestName(gid)
     if (gmSrc(gid) == "create") {
         if (!d) {
-            try { sbAddChild(SWITCH_DRIVER, gmDni(gid), label) }
+            if (!create || (gmMade(gid) && !force)) return          // missing: Recreate or Delete on its page
+            try { d = sbAddChild(SWITCH_DRIVER, gmDni(gid), label) }
             catch (e) { log.error "${APP_TITLE}: couldn't create the '${label}' switch: ${e}"; state.gmErr = "Couldn't create the switch \"${label}\". (${e.message})" }
         } else if (d.label != label) {
             try { sbRelabel(d, label) } catch (e) { logDebug "relabel ${label}: ${e}" }
         }
-    } else if (d) {
-        try { sbDeleteChild(gmDni(gid)) } catch (e) { log.warn "${APP_TITLE}: couldn't delete the unused '${label}' switch: ${e}" }
+        if (d) setGmMade(gid, true)
+    } else {
+        if (d) {
+            try { sbDeleteChild(gmDni(gid)); d = null } catch (e) { log.warn "${APP_TITLE}: couldn't delete the unused '${label}' switch: ${e}" }
+        }
+        if (!d) setGmMade(gid, false)
     }
 }
 private void ensureGuestSwitches() {
     syncGuests()
-    guestIds().each { ensureGuestSwitch(it) }
+    guestIds().each { ensureGuestSwitch(it as String) }     // never made → make it; made and deleted → missing
 }
 
 /** subscribe and re-arm every Guest Mode (initialize) */
@@ -2979,10 +3087,9 @@ void initialize() {
     unschedule()
     state.remove("hubCookie"); state.remove("hubCookieAt")      // the hub login is gone (0.5.0)
     cleanDrafts()
-    if (ensureHub()) {                     // no parent device → its error is on the page; don't try (and fail) every device
-        ensureGuestSwitches()
-        ensureChildren()
-    } else syncGuests()
+    dropOrphanSettings()
+    // missing devices are NOT re-created here (see missingDevices); no parent device → its error is on the page
+    if (ensureHub()) ensureGuestSwitches() else syncGuests()
 
     subscribe(location, "systemStart", "hubRestarted")
 
@@ -3014,6 +3121,17 @@ void initialize() {
     if (sirenVerifyOn()) sirenVerifySchedule() else atomicState.sirenVerify = [:]
     if (logEnable) runIn(1800, "logsOff")
     if (!qUrgent().isEmpty() || !qNormal().isEmpty() || !mapFor(RESTORE).isEmpty() || !mapFor(BUSY).isEmpty()) runInMillis(500, "processQueue")
+    refreshMissing()
+}
+
+/** settings of items that no longer exist ("gm_g3_name" with no g3): an edit page can save its fields again right after Delete */
+private void dropOrphanSettings() {
+    new ArrayList<String>(settings.keySet().collect { it as String }).each { String k ->
+        List p = k.split("_", 3) as List
+        if (p.size() == 3 && EDITS[p[0]] && (p[1] as String) ==~ /[a-z]\d+/ && !rawMap(p[0] as String).containsKey(p[1])) {
+            try { app.removeSetting(k) } catch (e) { logDebug "removeSetting ${k}: ${e}" }
+        }
+    }
 }
 
 /** after a hub reboot: Test Mode off, forget busy state from before the restart, re-subscribe, re-arm timers, resume the queue */

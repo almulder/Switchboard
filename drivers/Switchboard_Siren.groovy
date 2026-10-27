@@ -17,12 +17,13 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.1 - 2026-10-26 - Tells Switchboard when it's deleted, so the app can show it as missing.
  *  0.1.0 - 2026-10-26 - Initial build.
  */
 
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.1.0"
+@Field static final String DRIVER_VERSION = "0.1.1"
 
 metadata {
     definition(name: "Switchboard Siren", namespace: "almulder", author: "Albert Mulder") {
@@ -45,6 +46,10 @@ def installed() {
     sendEvent(name: "switch", value: "off")
     sendEvent(name: "lastMessage", value: "none")
     sendEvent(name: "lastSource", value: "none")
+}
+
+def uninstalled() {
+    try { parent?.sbChildRemoved(device.deviceNetworkId) } catch (ignored) { }    // Switchboard shows it as missing
 }
 
 def updated() {
