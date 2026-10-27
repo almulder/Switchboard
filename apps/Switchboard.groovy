@@ -4,7 +4,7 @@
  *  Delivers announcements, push notifications and siren alerts on behalf of any other app.
  *  Automations (webCoRE pistons, Rule Machine rules, HSM…) send to Switchboard virtual devices;
  *  Switchboard decides how, when and whether the real speakers, phones and sirens are used:
- *  one queue for every speaker, volume by day/night, Guest Mode, Test Mode and a message log.
+ *  one queue for every speaker, volume by day/night, modes (guests, yard work…), Test Mode and a message log.
  *
  *  Requires Hubitat platform 2.5.0 or newer and the five Switchboard drivers
  *  (Switchboard Parent, Switchboard Speaker, Switchboard Notifier, Switchboard Siren, Switchboard Switch).
@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.8.0 - 2026-10-27 - Guest Modes are now Modes, each a Guest mode or an Other mode. Switches are named for you:
+ *                       "Guest Mode, Lily - SB" or "Yard Work - SB" (type only the name).
  *  0.7.5 - 2026-10-27 - A sound's length can be a decimal (e.g. 1.5 s). A speaker's whole-second report no longer overrides
  *                       a length it's within a second of. Profiles can give chimes and sounds their own volume (day / night
  *                       or fixed), separate from the words.
@@ -53,7 +55,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.7.5"
+@Field static final String APP_VERSION = "0.8.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -117,7 +119,7 @@ definition(
     name: "Switchboard",
     namespace: "almulder",
     author: "Albert Mulder",
-    description: "Announcements, notifications and sirens for every app: one speech queue, day/night volume, Guest Mode, Test Mode and a message log.",
+    description: "Announcements, notifications and sirens for every app: one speech queue, day/night volume, modes (guests, yard work…), Test Mode and a message log.",
     category: "Convenience",
     menu: "Automations",
     iconUrl: "", iconX2Url: "",
@@ -175,7 +177,7 @@ private String warn(String s) { uiWarn(s) }
 private String fmtTime(Long ms) { ms ? new Date(ms).format("EEE MMM d, h:mm a", location.timeZone) : "" }
 private String fmtShort(Long ms) { ms ? new Date(ms).format("MMM d h:mm:ss a", location.timeZone) : "" }
 private String pageHead(String title, String subtitle) { uiCss() + uiHeader(title, subtitle, modePills()) }
-/** TEST MODE / GUEST MODE pills (empty when both are off) */
+/** TEST MODE / mode pills (empty when all are off) */
 private String modePills() {
     List p = []
     if (isTestMode())  p << uiPill("TEST MODE", "warn")
@@ -276,7 +278,7 @@ def mainPage(params = null) {
                 paragraph uiPill("Test Mode off", "info")
                 href "testPage", title: "Turn on Test Mode…", description: "Confirm the warning on the Test Mode page"
             }
-            if (!guestIds()) paragraph note("No Guest Modes yet.")
+            if (!guestIds()) paragraph note("No modes yet.")
             guestIds().each { String gid ->
                 boolean on = isGuestOn(gid)
                 Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
@@ -297,7 +299,7 @@ def mainPage(params = null) {
             href "logPage", title: "Message log", description: "All ${l.size()} entries, with filters"
         }
         section(uiTitle(null, "Setup")) {
-            href "profilesPage", title: "Announcement Profiles" + tip("Each profile is one Switchboard speaker device for your rules, e.g. 'Announce – Doors'. The profile picks the real speakers, volume, priority and Guest Mode behaviour."),
+            href "profilesPage", title: "Announcement Profiles" + tip("Each profile is one Switchboard speaker device for your rules, e.g. 'Announce – Doors'. The profile picks the real speakers, volume, priority and what it does in each mode."),
                  description: "Speakers, volume, priority · ${ids('prof').size()} profile(s)"
             href "notifyPage", title: "Notifications" + tip("Each one is a Switchboard notification device, e.g. 'Notify – Everyone'. Rules send to it; it forwards to the phones you pick."),
                  description: "Phones and push · ${ids('ntf').size()} device(s)"
@@ -305,7 +307,7 @@ def mainPage(params = null) {
             href "soundsPage", title: "Sound files", description: "Chimes and sounds to play · ${soundIds().size()} sound(s)"
             href "speakersPage", title: "Speakers & queue", description: "How each speaker speaks, queue timing · ${allSpeakers().size()} speaker(s)"
             href "testPage", title: "Test Mode", description: isTestMode() ? "ON" : "Off"
-            href "guestPage", title: "Guest Modes", description: guestIds() ? "${guestIds().size()} Guest Mode(s), ${guestsOn().size()} on" : "None yet"
+            href "guestPage", title: "Modes", description: guestIds() ? "${plural(guestIds().size(), 'mode')}, ${guestsOn().size()} on" : "None yet"
             href "logPage", title: "Message log", description: "What was played, skipped or sent, and by which rule"
             href "settingsPage", title: "Settings", description: "Night time, who is home, stopping alarms, rule lookup, logging"
         }
@@ -330,7 +332,7 @@ private String queueStatus() {
     ntf : [stateKey: "notifiers", idp: "n", list: "notifyPage",   edit: "notifyEditPage",  what: "notification", listTitle: "Notifications"],
     sir : [stateKey: "sirens",    idp: "r", list: "sirensPage",   edit: "sirenEditPage",   what: "siren",        listTitle: "Sirens"],
     snd : [stateKey: "sounds",    idp: "s", list: "soundsPage",   edit: "soundEditPage",   what: "sound",        listTitle: "Sound files"],
-    gm  : [stateKey: "guests",    idp: "g", list: "guestPage",    edit: "guestEditPage",   what: "Guest Mode",   listTitle: "Guest Modes"]
+    gm  : [stateKey: "guests",    idp: "g", list: "guestPage",    edit: "guestEditPage",   what: "Mode",         listTitle: "Modes"]
 ]
 
 /** the kind's state map, drafts included (runtime code uses ids() / soundIds() / guestIds(), which leave drafts out) */
@@ -348,7 +350,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
-    gm  : ["name", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs"]
+    gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs"]
 ]
 private void removeItemSettings(String kind, String id) {
     String pre = "${kind}_${id}_".toString()
@@ -374,7 +376,6 @@ private String newDraft(String kind) {
     removeItemSettings(kind, id)
     m[id] = [name: "", draft: true, touched: now()]
     state[e.stateKey as String] = m
-    if (kind == "gm" && !guestIds()) app.updateSetting("gm_${id}_name", [type: "text", value: "Guest Mode -SB"])
     return id
 }
 private void discardDraft(String kind, String id) {
@@ -453,7 +454,7 @@ private boolean editHead(String kind, String id) {
         if (id && state.okMsg) { paragraph uiOk(state.okMsg as String); state.remove("okMsg") }
         if (id && isMissing(kind, id)) {
             String dev = kind == "gm" ? "switch" : "device"
-            paragraph warn("Its ${dev} <b>${esc(kind == 'gm' ? guestName(id) : deviceLabel(kind, id))}</b> is missing (deleted outside Switchboard, or it couldn't be created). " +
+            paragraph warn("Its ${dev} <b>${esc(kind == 'gm' ? gmSwitchLabel(id) : deviceLabel(kind, id))}</b> is missing (deleted outside Switchboard, or it couldn't be created). " +
                            "Rules that used it no longer reach Switchboard. Recreate it (a new ${dev}: point your rules at it again), or delete this ${e.what} at the bottom.")
             input "btnRecreate_${kind}_${id}", "button", title: "Recreate ${dev}", width: 4
         }
@@ -596,7 +597,7 @@ def profileEditPage(params = null) {
                       range: "0..3600", defaultValue: 30, width: 6
             }
         }
-        section(uiTitle(null, "Guest Modes")) {
+        section(uiTitle(null, "Modes")) {
             guestInputs("prof_${pid}", urgent)
         }
         section(uiTitle(null, "Test")) {
@@ -652,7 +653,7 @@ def notifyEditPage(params = null) {
             input pre + "prefix", "text", title: "Text added before each message (optional)", required: false, width: 6
             input pre + "pushover", "bool", title: "Mark as high priority (Pushover [H])" + tip("Adds [H] in front of the message on Pushover devices only."), defaultValue: false
         }
-        section(uiTitle(null, "Guest Modes")) {
+        section(uiTitle(null, "Modes")) {
             guestInputs("ntf_${nid}", false)
         }
         section(uiTitle(null, "Test")) {
@@ -695,7 +696,7 @@ def sirensPage(params = null) {
                   defaultValue: true, submitOnChange: true
             if (sirenVerify != false) {
                 input "sirenAlertDevs", "capability.notification", title: "Tell me if a siren won't turn off" +
-                      tip("Pushed straight to these, even in Test Mode or Guest Mode. Empty = the Test Mode testers; " +
+                      tip("Pushed straight to these, even in Test Mode or any mode. Empty = the Test Mode testers; " +
                           "if those are empty too, it is only written to the log."),
                       multiple: true, required: false
                 if (!sirenAlertDevs && !tmDevices) paragraph warn("Nobody picked: a siren that won't turn off is only written to the log.")
@@ -720,7 +721,7 @@ def sirenEditPage(params = null) {
             input pre + "maxMin", "number", title: "Stop after (minutes)" + tip("Sirens are turned off after this long even if no rule turns them off. 0 = never."),
                   range: "0..60", defaultValue: 5, width: 6
         }
-        section(uiTitle(null, "Guest Modes")) {
+        section(uiTitle(null, "Modes")) {
             guestInputs("sir_${rid}", false)
         }
         section {
@@ -955,12 +956,13 @@ def guestPage(params = null) {
     syncGuests()
     dynamicPage(name: "guestPage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
-            paragraph pageHead("Guest Modes", "${APP_TITLE}")
-            paragraph uiHint("Make one Guest Mode per kind of visit (e.g. <i>Guest Mode Paul</i>, <i>Housekeeper</i>). " +
+            paragraph pageHead("Modes", "${APP_TITLE}")
+            paragraph uiHint("Make a mode for each situation: <b>Guest modes</b> for visits (switch <i>Guest Mode, Paul - SB</i>), " +
+                             "<b>other modes</b> for anything else, like yard work (switch <i>Yard Work - SB</i>). " +
                              "Each profile, notification and siren picks which ones make it play, which make it stay silent, and what it does the rest of the time. Play always wins.") +
-                      tip("Several Guest Modes can be on at once. Each has its own switch that dashboards, webCoRE and Rule Machine can turn on and off.")
+                      tip("Several modes can be on at once. Each has its own switch that dashboards, webCoRE and Rule Machine can turn on and off.")
             if (state.gmErr) { paragraph warn(state.gmErr as String); state.remove("gmErr") }
-            if (!guestIds()) paragraph uiHint("No Guest Modes yet.")
+            if (!guestIds()) paragraph uiHint("No modes yet.")
             guestIds().each { String gid ->
                 boolean on = isGuestOn(gid)
                 Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
@@ -986,7 +988,7 @@ def guestEditPage(params = null) {
         boolean on = isGuestOn(gid)
         Long end = ((state.gmOffAt ?: [:]) as Map)[gid] as Long
         String src = gmSrc(gid)
-        section(uiTitle(null, "Guest Mode")) {
+        section(uiTitle(null, "Mode")) {
             if (!draft) {
                 paragraph on ? uiPill("ON", "info") + (end ? " " + note("until ${fmtTime(end)}") : "") : uiPill("off", "off")
                 if (src != "modes") {
@@ -994,15 +996,18 @@ def guestEditPage(params = null) {
                     else input "btnGmOn_${gid}", "button", title: "Turn on", width: 3
                 }
             }
-            input pre + "name", "text", title: "Name" + tip("Renaming also renames its switch."), submitOnChange: true, width: 6,
-                  defaultValue: (draft && !guestIds()) ? "Guest Mode -SB" : null
+            input pre + "type", "enum", title: "Kind of mode", submitOnChange: true, defaultValue: "guest", width: 6,
+                  options: [guest: "Guest mode (a visit)", other: "Other mode (yard work, cleaning…)"]
+            input pre + "name", "text", title: "Name" + tip(gmGuest(gid) ? "Just the guest, e.g. Lily or All. The switch is named \"Guest Mode, Lily - SB\"; renaming renames it." :
+                                                                   "E.g. Yard Work. The switch is named \"Yard Work - SB\"; renaming renames it."),
+                  submitOnChange: true, width: 6
             input pre + "source", "enum", title: "Turned on by", submitOnChange: true, defaultValue: "create", width: 6,
                   options: [create: "Its own switch (recommended)", existing: "A switch I already have", modes: "Hub mode(s)"]
             if (src == "create") {
-                paragraph note("Switch: <b>${esc(draft && !cleanName(settings[pre + 'name'] as String) ? '(the name above)' : guestName(gid))}</b>" +(sbChild(gmDni(gid)) ? "" : " (created when you press Save)"))
+                paragraph note("Switch: <b>${esc(draft && !cleanName(settings[pre + 'name'] as String) ? '(the name above)' : gmSwitchLabel(gid))}</b>" +(sbChild(gmDni(gid)) ? "" : " (created when you press Save)"))
             } else if (src == "existing") {
                 input pre + "switch", "capability.switch", title: "Switch", required: false, width: 6
-                if (!settings[pre + "switch"]) paragraph warn("Pick a switch, or this Guest Mode can't turn on.")
+                if (!settings[pre + "switch"]) paragraph warn("Pick a switch, or this mode can't turn on.")
             } else {
                 input pre + "modes", "mode", title: "On while the hub is in", multiple: true, required: false, width: 6
                 paragraph note("Your mode rules turn it on and off; Switchboard can't.")
@@ -1010,7 +1015,7 @@ def guestEditPage(params = null) {
         }
         section(uiTitle(null, "When it ends")) {
             if (src != "modes") {
-                input pre + "endDate", "date", title: "Guests leave on", required: false, submitOnChange: true, width: 4
+                input pre + "endDate", "date", title: gmGuest(gid) ? "Guests leave on" : "Ends on", required: false, submitOnChange: true, width: 4
                 input pre + "endTime", "time", title: "at", required: false, submitOnChange: true, width: 4
                 if (!draft && settings[pre + "endDate"] && settings[pre + "endTime"]) input "btnGmUntil_${gid}", "button", title: "On until then", width: 4
                 input pre + "defaultHours", "number", title: "If turned on another way (dashboard, rule), turn off after (hours)" +
@@ -1336,7 +1341,7 @@ List<Map> missingDevices() {
     List<Map> out = []
     Set<String> have = childDnis()
     KINDS.keySet().each { String kind -> ids(kind).each { String id -> if (isMissing(kind, id, have)) out << [kind: kind, id: id, label: deviceLabel(kind, id)] } }
-    guestIds().each { String gid -> if (isMissing("gm", gid, have)) out << [kind: "gm", id: gid, label: guestName(gid)] }
+    guestIds().each { String gid -> if (isMissing("gm", gid, have)) out << [kind: "gm", id: gid, label: gmSwitchLabel(gid)] }
     if (isMissing("stop", "", have)) out << [kind: "stop", id: "", label: STOP_LABEL]
     return out
 }
@@ -1360,7 +1365,7 @@ private void recreateDevice(String kind, String id, boolean one = true) {
     def d
     String label
     if (kind == "stop") { d = createStopSwitch(); label = STOP_LABEL }
-    else if (kind == "gm") { ensureGuestSwitch(id, true, true); d = sbChild(gmDni(id)); label = guestName(id); if (d) initGuests() }
+    else if (kind == "gm") { ensureGuestSwitch(id, true, true); d = sbChild(gmDni(id)); label = gmSwitchLabel(id); if (d) initGuests() }
     else if (KINDS[kind]) { d = ensureDevice(kind, id); label = deviceLabel(kind, id) }
     if (d) {
         if (one) state.okMsg = "Recreated \"${label}\". It's a new device: point the rules that used the old one at it again" +
@@ -1654,7 +1659,7 @@ void sbSiren(String dni, String mode) {
         entry.outcome = "test → testers"
     } else if (guestSkip("sir_${rid}")) {
         childEvent(child, "alarm", "off"); childEvent(child, "switch", "off")        // reflect what Switchboard did
-        childEvent(child, "lastMessage", "Guest Mode — sirens not sounded")
+        childEvent(child, "lastMessage", "Silenced by a mode — sirens not sounded")
         entry.outcome = guestSkip("sir_${rid}")
     } else {
         int ok = sirenCommand(rid, m)
@@ -2323,9 +2328,22 @@ List<String> guestIds() {
     Map g = (state.guests ?: [:]) as Map
     return liveKeys(g).sort { a, b -> guestName(a as String).toLowerCase() <=> guestName(b as String).toLowerCase() } as List
 }
-String guestName(String gid) {
-    cleanName(settings["gm_${gid}_name"] as String) ?: ((state.guests ?: [:])[gid]?.name ?: "(deleted Guest Mode)") as String
+/** Guest mode or other mode (only the name and some wording differ) */
+private boolean gmGuest(String gid) { (settings["gm_${gid}_type"] ?: "guest") != "other" }
+/** the name as typed, without the "Guest Mode," or " - SB" Switchboard adds itself */
+private String gmBase(String gid) {
+    String raw = cleanName(settings["gm_${gid}_name"] as String) ?: ((state.guests ?: [:])[gid]?.name ?: "") as String
+    String n = raw.replaceAll(/(?i)\s*-\s*SB\s*$/, "").trim()
+    if (gmGuest(gid)) n = n.replaceAll(/(?i)^guest\s*mode\s*[,:\-]?\s*/, "").trim()
+    return n ?: raw
 }
+/** "Guest Mode, Lily" or "Yard Work" */
+String guestName(String gid) {
+    String b = gmBase(gid)
+    return b ? (gmGuest(gid) ? "Guest Mode, ${b}" : b) : "(deleted mode)"
+}
+/** its own switch: "Guest Mode, Lily - SB" or "Yard Work - SB" */
+private String gmSwitchLabel(String gid) { "${guestName(gid)} - SB".toString() }
 Map guestOptions() { guestIds().collectEntries { [(it): guestName(it)] } }
 private String gmDni(String gid) { "SB-${app.id}-gm-${gid}".toString() }
 private String gmSrc(String gid) { (settings["gm_${gid}_source"] ?: "create") as String }
@@ -2360,23 +2378,23 @@ private String guestSkip(String prefix) {
     if (play.any { isGuestOn(it as String) }) return null
     String q = quiet.find { isGuestOn(it as String) } as String
     if (q) return "skipped – ${guestName(q)}"
-    return settings["${prefix}_guestOther"] == "silent" ? "skipped – no Guest Mode says play" : null
+    return settings["${prefix}_guestOther"] == "silent" ? "skipped – no mode says play" : null
 }
 /** the Guest Mode pickers for a profile / notifier / siren (Play / Quiet / the rest of the time) */
 private void guestInputs(String prefix, boolean urgent) {
     Map opts = guestOptions()
-    if (!opts) { paragraph note("Guest Modes: none yet (add them on the Guest Modes page)."); return }
+    if (!opts) { paragraph note("Modes: none yet (add them on the Modes page)."); return }
     List play = ((settings["${prefix}_guestPlay"] ?: []) as List)
-    input "${prefix}_guestPlay", "enum", title: "Play while any of these Guest Modes are on" +
+    input "${prefix}_guestPlay", "enum", title: "Play while any of these modes are on" +
           tip("Play always wins: if one of these is on, it plays even when a 'Stay silent' mode is on too."),
           options: opts, multiple: true, required: false, submitOnChange: true, width: 6
     input "${prefix}_guestQuiet", "enum", title: "Stay silent while any of these are on" +
-          tip(urgent ? "Safety alerts should keep playing during Guest Mode." : "For example bedroom doors while guests sleep there."),
+          tip(urgent ? "Safety alerts should keep playing in every mode." : "For example bedroom doors while guests sleep there."),
           options: opts.findAll { k, v -> !play.contains(k) }, multiple: true, required: false, width: 6
     input "${prefix}_guestOther", "enum", title: "The rest of the time" +
-          tip("Silent = only plays while a Guest Mode above says Play, e.g. a 'Housekeeper is here' notifier."),
-          options: [play: "Play", silent: "Silent (only plays while a Guest Mode above says Play)"], defaultValue: "play", required: false, width: 6
-    if (urgent && (settings["${prefix}_guestQuiet"] || settings["${prefix}_guestOther"] == "silent")) paragraph warn("Safety alerts should keep playing during Guest Mode.")
+          tip("Silent = only plays while a mode above says Play, e.g. a 'Housekeeper is here' notifier."),
+          options: [play: "Play", silent: "Silent (only plays while a mode above says Play)"], defaultValue: "play", required: false, width: 6
+    if (urgent && (settings["${prefix}_guestQuiet"] || settings["${prefix}_guestOther"] == "silent")) paragraph warn("Safety alerts should keep playing in every mode.")
 }
 
 private void deleteGuest(String gid) {
@@ -2413,11 +2431,11 @@ private void setGmMade(String gid, boolean on) {
     state.guests = g
 }
 
-/** Switchboard's own Guest Mode virtual switches (normal, non-component), labelled with the mode's name.
+/** Switchboard's own mode virtual switches (normal, non-component): "Guest Mode, Lily - SB" / "Yard Work - SB".
  *  Makes the switch only the first time (Save, Done); once made, a deleted switch is "missing" until Recreate (force). */
 private void ensureGuestSwitch(String gid, boolean create = true, boolean force = false) {
     def d = sbChild(gmDni(gid))
-    String label = guestName(gid)
+    String label = gmSwitchLabel(gid)
     if (gmSrc(gid) == "create") {
         if (!d) {
             if (!create || (gmMade(gid) && !force)) return          // missing: Recreate or Delete on its page

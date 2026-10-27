@@ -194,13 +194,17 @@ emergency only reaches the testers' phones. Smoke alarms with their own sounders
 Mode** button only works when it is ticked; `tmAck` is cleared every time Test Mode turns off.
 Turning on always pushes the warning text and the auto-off time to the testers; reminders repeat it.
 
-### Guest Modes (as many as you like)
-A list of named Guest Modes, e.g. "Guest Mode -SB", "Guest Mode Paul", "Guest Mode Lily", "Housekeeper". Ids `g1`,
-`g2`…; stored in `state.guests` id → [name]. Added with "Add new Guest Mode" like the other lists (the first one's
-name is pre-filled **"Guest Mode -SB"**); its switch is created on Save. Delete on its edit page (confirm).
-Per Guest Mode `<id>`:
-- `gm_<id>_name` (renaming relabels its switch);
-- `gm_<id>_source` create (default: Switchboard creates a Virtual Switch labelled with the name; a normal,
+### Modes (as many as you like; called Guest Modes before 0.8.0)
+A list of modes, each a **Guest mode** (a visit) or an **Other mode** (yard work, cleaning…). The kind only changes
+the name and some wording ("Guests leave on" vs "Ends on"); both behave the same. Ids `g1`, `g2`…; stored in
+`state.guests` id → [name]. Code keys still say guest / gm. Added with "Add new Mode" like the other lists; its switch is
+created on Save. Delete on its edit page (confirm).
+Per mode `<id>`:
+- `gm_<id>_type` guest (default) / other;
+- `gm_<id>_name` — just the name ("Lily", "All", "Yard Work"). Shown as "Guest Mode, Lily" or "Yard Work"; its own
+  switch is labelled "Guest Mode, Lily - SB" or "Yard Work - SB". A typed " - SB" (and, for Guest modes, a leading
+  "Guest Mode") is dropped from the name so it isn't doubled. Renaming or changing the kind relabels the switch;
+- `gm_<id>_source` create (default: Switchboard creates a Virtual Switch with that label; a normal,
   non-component switch that webCoRE, Rule Machine and dashboards can use and turn on/off freely) / existing switch
   (`gm_<id>_switch`) / hub modes (`gm_<id>_modes`);
 - `gm_<id>_endDate` + `gm_<id>_endTime` and an "On until…" button; `gm_<id>_defaultHours` "If turned on another
