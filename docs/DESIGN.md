@@ -261,6 +261,10 @@ Track playback: `playTrackAndRestore(url, vol)` if supported, else set volume + 
 setVolume + `playTrack` path. Found on a Sonos S1 Connect:Amp (Hubitat's Sonos Player 2 driver): after
 `playTrackAndRestore`, the next `speak` came out 1–2 minutes late; after plain `playTrack` it came out on time.
 S2 speakers were fine either way. Cost: music playing on that speaker stops instead of resuming.
+**Sound length and volume (0.7.5):** a sound's length is a decimal (min 0.5 s). trackLengthCheck ignores a reported
+length within 1 s of the assumed one (speakers report whole seconds). Each profile has `sndVolMode` (same / daynight /
+fixed, with `sndDayVol`, `sndNightVol`, `sndFixedVol`) for its chime and sound/track parts; the words keep the
+profile's own volume. Night uses the same night window as the words.
 
 **Real track length (0.5.0):** every track / sound part that starts on real speakers (`playTrackOn`) schedules
 `trackLengthCheck` 2 s later (`runInMillis`, `overwrite: false`, data: speaker ids, sent / start time, assumed secs,

@@ -18,6 +18,9 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.7.5 - 2026-10-27 - A sound's length can be a decimal (e.g. 1.5 s). A speaker's whole-second report no longer overrides
+ *                       a length it's within a second of. Profiles can give chimes and sounds their own volume (day / night
+ *                       or fixed), separate from the words.
  *  0.7.4 - 2026-10-27 - A chime runs straight into its words: the pause between messages now only follows the last part.
  *  0.7.3 - 2026-10-27 - Per-speaker "Play sounds without restore" (Speakers & queue): for speakers such as Sonos S1 that hold up
  *                       the next message for minutes after playTrackAndRestore. Sounds then use setVolume + playTrack.
@@ -50,7 +53,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.7.4"
+@Field static final String APP_VERSION = "0.7.5"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -341,7 +344,7 @@ private List liveKeys(Map m) { m.findAll { k, v -> !(v instanceof Map && v.draft
 private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? one : (many ?: one + 's')}".toString() }
 /** every input an item's edit page can create, per kind (an empty device picker is not in settings.keySet(), so name them all) */
 @Field static final Map<String, List<String>> ITEM_INPUTS = [
-    prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
+    prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "sndVolMode", "sndDayVol", "sndNightVol", "sndFixedVol", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
     ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
@@ -569,8 +572,20 @@ def profileEditPage(params = null) {
                 input pre + "fixedVol", "number", title: "Volume", range: "0..100", defaultValue: 60, width: 3
             }
             Map snds = soundOptions()
-            if (snds) input pre + "chime", "enum", title: "Chime before each message (optional)" + tip("A short sound before every spoken message on this profile. Speakers that can't play files just speak."),
-                            options: snds, required: false, width: 6
+            if (snds) {
+                input pre + "chime", "enum", title: "Chime before each message (optional)" + tip("A short sound before every spoken message on this profile. Speakers that can't play files just speak."),
+                      options: snds, required: false, width: 6
+                input pre + "sndVolMode", "enum", title: "Chime and sound volume" + tip("The chime, and sounds rules play on this profile (playSound, playTrack). Same as the words, or a volume of their own. With \"Use the volume the rule sends\", a message whose rule sends no volume plays its chime at the speaker's current volume too."),
+                      submitOnChange: true, defaultValue: "same", width: 6,
+                      options: [same: "Same as the words", daynight: "Own day / night volume", fixed: "Own fixed volume"]
+                String sm = settings[pre + "sndVolMode"] ?: "same"
+                if (sm == "daynight") {
+                    input pre + "sndDayVol", "number", title: "Sound day volume", range: "0..100", defaultValue: 70, width: 3
+                    input pre + "sndNightVol", "number", title: "Sound night volume", range: "0..100", defaultValue: 40, width: 3
+                } else if (sm == "fixed") {
+                    input pre + "sndFixedVol", "number", title: "Sound volume", range: "0..100", defaultValue: 60, width: 3
+                }
+            }
         }
         section(uiTitle(null, "Skipping")) {
             input pre + "dedupeSec", "number", title: "Skip the same message if it was played in the last (seconds)" + tip("Stops a rule that fires twice from saying the same thing twice. 0 = never skip."),
@@ -733,7 +748,7 @@ def soundsPage(params = null) {
             soundIds().each { String sid ->
                 String u = soundUrl(sid)
                 String file = u ? u.replaceAll(/[?#].*$/, "").tokenize("/").with { it ? it.last() : u } : "no URL yet"
-                editRow("snd", sid, esc(soundName(sid)) + (u ? "" : " " + uiPill("no URL", "warn")), "${file} · ${soundSecs(sid)} s")
+                editRow("snd", sid, esc(soundName(sid)) + (u ? "" : " " + uiPill("no URL", "warn")), "${file} · ${soundSecs(sid).stripTrailingZeros().toPlainString()} s")
             }
         }
         addRow("snd")
@@ -779,7 +794,7 @@ def soundEditPage(params = null) {
                 if (picked || !setUrl) {
                     String want = hubFileUrl(sel)
                     if (setUrl != want) app.updateSetting(pre + "url", [type: "text", value: want])
-                    app.updateSetting(pre + "secs", [type: "number", value: files[sel].secs])      // a new file: estimate its length
+                    app.updateSetting(pre + "secs", [type: "decimal", value: files[sel].secs])      // a new file: estimate its length
                     if (!cleanName(settings[pre + "name"] as String)) app.updateSetting(pre + "name", [type: "text", value: sel.replaceAll(/\.[^.]+$/, "")])
                     url = want
                 }
@@ -798,8 +813,8 @@ def soundEditPage(params = null) {
                 else if (u && !(u.replaceAll(/[?#].*$/, "") ==~ /(?i).*\.(mp3|wav|m4a|aac|ogg|flac)$/)) paragraph warn("That doesn't look like an audio file link (it should end in .mp3, .wav or .m4a). It may be a web page.")
             }
             input pre + "name", "text", title: "Name", submitOnChange: true, width: 6
-            input pre + "secs", "number", title: "Length (seconds)" + tip("How long it plays; the next message waits this long, unless the speaker reports the real length (Sonos does). For hub files this is estimated from the file size — adjust if it cuts off or waits too long."),
-                  range: "1..3600", defaultValue: 5, submitOnChange: true, width: 3
+            input pre + "secs", "decimal", title: "Length (seconds)" + tip("How long it plays; the next part or message waits this long (1.5 is fine), unless the speaker reports a real length more than a second different (Sonos does). For hub files this is estimated from the file size — adjust if it cuts off or waits too long."),
+                  range: "0.5..3600", defaultValue: 5, submitOnChange: true, width: 3
             if (!url) paragraph warn(draft ? "Pick a file or enter a web address." : "Pick a file or enter a web address, or this sound is skipped.")
         }
         section(uiTitle(null, "Test")) {
@@ -1436,7 +1451,7 @@ private void syncSounds() {
     m.each { sid, s ->
         String n = cleanName(settings["snd_${sid}_name"] as String); if (n) s.name = n
         if (settings["snd_${sid}_url"] != null) s.url = settings["snd_${sid}_url"].toString().trim()
-        if (settings["snd_${sid}_secs"]) s.secs = Math.max(1, settings["snd_${sid}_secs"] as Integer)
+        if (settings["snd_${sid}_secs"]) s.secs = soundSecs(sid)
     }
     state.sounds = m
 }
@@ -1445,9 +1460,9 @@ String soundUrl(String sid) {
     String u = (settings["snd_${sid}_url"] != null ? settings["snd_${sid}_url"] : state.sounds[sid].url) as String
     return u?.trim() ?: null
 }
-Integer soundSecs(String sid) {
+BigDecimal soundSecs(String sid) {
     def v = settings["snd_${sid}_secs"] ?: state.sounds?.get(sid)?.secs
-    return v ? Math.max(1, v as Integer) : 5
+    return v ? [0.5G, v as BigDecimal].max() : 5G
 }
 String soundName(String sid) {
     if (!sid || !state.sounds?.get(sid)) return "(deleted sound)"
@@ -1482,13 +1497,13 @@ void sbSpeak(String dni, Map req) {
     Integer cVol = clampVol(toInt(req?.volume))       // per-message volume; the driver keeps its own volume attribute
 
     String kind = "speak", sid = null, label
-    Integer secs = null
+    BigDecimal secs = null
     if (sndName) {
         kind = "sound"; sid = soundByName(sndName)
         label = "🔊 ${sid ? soundName(sid) : sndName}"
     } else if (uri) {
         kind = "sound"; sid = soundByUrl(uri)
-        secs = sid ? soundSecs(sid) : intSet("defaultTrackSecs", 10)
+        secs = sid ? soundSecs(sid) : (intSet("defaultTrackSecs", 10) as BigDecimal)
         label = "🔊 ${sid ? soundName(sid) : uri}"
     } else if (text) {
         label = text
@@ -2610,7 +2625,7 @@ private String enqueue(Map req, String logId) {
     String chime = req.profile ? settings["prof_${req.profile}_chime"] as String : null
     if (text && chime && soundUrl(chime)) parts << [sound: chime]
     if (sid) parts << [sound: sid]
-    if (req.uri) parts << [url: req.uri as String, secs: (req.secs ?: intSet("defaultTrackSecs", 10)) as Integer, name: (req.label ?: req.uri) as String]
+    if (req.uri) parts << [url: req.uri as String, secs: (req.secs ?: intSet("defaultTrackSecs", 10)) as BigDecimal, name: (req.label ?: req.uri) as String]
     if (text) parts << [text: text]
     Map item = [dni: req.dni, profile: req.profile, speakers: req.speakers ?: [], text: text, sound: sid, uri: req.uri,
                 parts: parts, step: 0, callerVolume: req.callerVolume, source: req.source, logId: logId,
@@ -2786,6 +2801,16 @@ private Integer itemVolume(Map item) {
     } else v = isNight() ? intSet("prof_${pid}_nightVol", 40) : intSet("prof_${pid}_dayVol", 70)
     return clampVol(v)
 }
+/** Volume for an item's chime / sound / track parts: the profile's own sound volume, or the same as the words.
+ *  Not when the words leave the volume alone (rule sent none): the words would then play at the sound's volume. */
+private Integer soundVolume(Map item, Integer wordsVol) {
+    String pid = item.profile as String
+    String sm = pid ? (settings["prof_${pid}_sndVolMode"] ?: "same") : "same"
+    if (wordsVol == null && ((item.parts ?: []) as List).any { it.text }) return null
+    if (sm == "fixed") return clampVol(intSet("prof_${pid}_sndFixedVol", 60))
+    if (sm == "daynight") return clampVol(isNight() ? intSet("prof_${pid}_sndNightVol", 40) : intSet("prof_${pid}_sndDayVol", 70))
+    return wordsVol
+}
 
 /**
  * Plays the item's next part (chime, sound, track or text) on all devices and moves it on one step.
@@ -2802,8 +2827,8 @@ private long playItem(Map item, List devs, boolean urgent) {
         Map part = parts[(item.step ?: 0) as Integer] as Map
         item.step = ((item.step ?: 0) as Integer) + 1
         long end = 0L
-        if (part.sound) end = playTrackOn(item, soundUrl(part.sound as String), soundSecs(part.sound as String), "🔊 ${soundName(part.sound as String)}", devs, vol)
-        else if (part.url) end = playTrackOn(item, part.url as String, (part.secs ?: 10) as Integer, part.name as String, devs, vol)
+        if (part.sound) end = playTrackOn(item, soundUrl(part.sound as String), soundSecs(part.sound as String), "🔊 ${soundName(part.sound as String)}", devs, soundVolume(item, vol))
+        else if (part.url) end = playTrackOn(item, part.url as String, (part.secs ?: 10) as BigDecimal, part.name as String, devs, soundVolume(item, vol))
         else end = speakText(item, part.text as String, devs, vol, urgent)
         if (end > 0) return end
     }
@@ -2814,13 +2839,15 @@ private long playItem(Map item, List devs, boolean urgent) {
  * Play a sound file: playTrackAndRestore(url, vol) where the driver has it (unless the speaker is set to play sounds
  * without restore), otherwise setVolume + playTrack(url) (the volume is restored once the speaker is done). Returns 0 if nothing played.
  */
-private long playTrackOn(Map item, String url, Integer secs, String name, List devs, Integer vol) {
+private long playTrackOn(Map item, String url, BigDecimal secs, String name, List devs, Integer vol) {
     if (!url) return 0L
     long sentAt = now()
     List played = [], later = []
     devs.each { dev ->
         try {
             if (dev.hasCommand("playTrackAndRestore") && (settings["spkPlain_${dev.id}"] != true || !dev.hasCommand("playTrack"))) {
+                // words follow at once: record the volume before the sound, so theirs can't pick up the sound's
+                if (vol != null && ((item.step ?: 0) as Integer) < ((item.parts ?: []) as List).size()) rememberVolume(dev)
                 if (vol != null) dev.playTrackAndRestore(url, vol)
                 else dev.playTrackAndRestore(url)
                 played << dev
@@ -2848,7 +2875,7 @@ private long playTrackOn(Map item, String url, Integer secs, String name, List d
     if (!played) return 0L
     item.played = true
     long startedAt = now()
-    Integer assumed = (secs ?: 5) as Integer
+    BigDecimal assumed = (secs ?: 5) as BigDecimal
     BigDecimal lead = played.collect { (settings["spkLead_${it.id}"] ?: 0) as BigDecimal }.max() ?: 0
     // the pause between messages goes after the last part only: a chime runs straight into its words
     boolean last = ((item.step ?: 0) as Integer) >= ((item.parts ?: []) as List).size()
@@ -2873,7 +2900,7 @@ private long playTrackOn(Map item, String url, Integer secs, String name, List d
 void trackLengthCheck(Map data) {
     try {
         long start = (data?.start ?: 0L) as long, oldEnd = (data?.end ?: 0L) as long, sent = (data?.sent ?: start) as long
-        Integer assumed = (data?.assumed ?: 0) as Integer
+        BigDecimal assumed = (data?.assumed ?: 0) as BigDecimal
         String dni = (data?.dni ?: "") as String
         Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
         ConcurrentHashMap<String, Map> busy0 = mapFor(BUSY)
@@ -2889,7 +2916,7 @@ void trackLengthCheck(Map data) {
         }
         if (!lens) { logDebug "No track length reported for ${data?.name}; keeping ${assumed}s"; return }
         Integer real = lens.max()
-        if (real == assumed) return
+        if ((real - assumed).abs() <= 1) return            // speakers report whole seconds: keep a set 1.5 s
         long newEnd = start + real * 1000L + ((data.extraMs ?: 0L) as long)
         int n = 0
         Semaphore lock = lockFor()
