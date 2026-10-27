@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.7.1 - 2026-10-26 - Leftover cleanup also removes the empty settings of deleted items (blank times, empty device lists).
  *  0.7.0 - 2026-10-26 - A Switchboard device deleted outside the app is no longer re-created on its own: it shows as missing (main page, its list and page, and "(1 device missing)" after the app's name in the Apps list) with Recreate or Delete. Leftover settings of deleted items are cleaned up.
  *  0.6.0 - 2026-10-26 - Every Switchboard device (Announce, Notify, Siren, Guest Mode and Stop All switches) is now a child of one "Switchboard" parent device. Needs the Switchboard Parent and Switchboard Switch drivers.
  *  0.5.0 - 2026-10-26 - One sound dropdown (hub files + web address); real track length from the speaker; hub login removed (not needed).
@@ -44,7 +45,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.7.0"
+@Field static final String APP_VERSION = "0.7.1"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -3132,6 +3133,19 @@ private void dropOrphanSettings() {
             try { app.removeSetting(k) } catch (e) { logDebug "removeSetting ${k}: ${e}" }
         }
     }
+    // empty inputs (a blank time, an empty device list) aren't in settings.keySet(): sweep every input name of each
+    // id that was handed out and no longer exists, once per id (ids are never reused)
+    List swept = (state.swept ?: []) as List
+    int before = swept.size()
+    EDITS.each { String kind, Map e ->
+        Map m = rawMap(kind)
+        int next = ((state["next_${kind}".toString()] ?: 1) as Integer)
+        (1..<Math.max(1, next)).each { int n ->
+            String id = "${e.idp}${n}".toString(), key = "${kind}_${id}".toString()
+            if (!m.containsKey(id) && !swept.contains(key)) { removeItemSettings(kind, id); swept << key }
+        }
+    }
+    if (swept.size() != before) state.swept = swept
 }
 
 /** after a hub reboot: Test Mode off, forget busy state from before the restart, re-subscribe, re-arm timers, resume the queue */
