@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.8.3 - 2026-10-27 - A mode's Remind phones get only the daily reminder, unless "Also push when it turns on or off" is ticked.
  *  0.8.2 - 2026-10-27 - The main page no longer lists every mode with on/off buttons (use the Modes page; modes that are on still show at the top).
  *  0.8.1 - 2026-10-27 - A mode is a plain mode unless you set it to Guest (was: Guest unless set to Other).
  *  0.8.0 - 2026-10-27 - Guest Modes are now Modes, each a Guest mode or an Other mode. Switches are named for you:
@@ -57,7 +58,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.8.2"
+@Field static final String APP_VERSION = "0.8.3"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -341,7 +342,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
-    gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs"]
+    gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs", "notifyOnOff"]
 ]
 private void removeItemSettings(String kind, String id) {
     String pre = "${kind}_${id}_".toString()
@@ -1014,6 +1015,7 @@ def guestEditPage(params = null) {
             }
             input pre + "remindTime", "time", title: "Daily reminder at (blank = none)", required: false, width: 4
             input pre + "remindDevs", "capability.notification", title: "Remind", multiple: true, required: false, width: 8
+            input pre + "notifyOnOff", "bool", title: "Also push to them when it turns on or off", defaultValue: false, width: 8
         }
         section {
             if (draft) {
@@ -2492,10 +2494,10 @@ private void guestChanged(String gid, boolean on) {
             if (end) off[gid] = end else off.remove(gid)
         }
         state.gmOffAt = off
-        guestNotice(gid, "${n} is ON" + (off[gid] ? " until ${fmtTime(off[gid] as Long)}." : "."))
+        guestNotice(gid, "${n} is ON" + (off[gid] ? " until ${fmtTime(off[gid] as Long)}." : "."), true)
     } else {
         off.remove(gid); state.gmOffAt = off
-        guestNotice(gid, "${n} is OFF.")
+        guestNotice(gid, "${n} is OFF.", true)
     }
     addLog([id: newLogId(), t: now(), dev: n, dni: "", kind: "mode", text: "${n} ${on ? 'on' : 'off'}", outcome: on ? "on" : "off", source: ""])
     scheduleGuestTimers()
@@ -2515,7 +2517,7 @@ private void guestOn(String gid, boolean untilPicked) {
     state.gmOffAt = off
     scheduleGuestTimers()          // arm the auto-off now, even if its switch isn't subscribed yet (picked before Done)
     if (d.currentValue("switch") == "on") {
-        guestNotice(gid, "${guestName(gid)} now " + (end ? "ends ${fmtTime(end)}." : "stays on until turned off."))
+        guestNotice(gid, "${guestName(gid)} now " + (end ? "ends ${fmtTime(end)}." : "stays on until turned off."), true)
     } else d.on()
 }
 private void guestOff(String gid) { gmDevice(gid)?.off() }
@@ -2581,7 +2583,9 @@ void guestReminderCheck() {
     }
     scheduleGuestTimers()
 }
-private void guestNotice(String gid, String msg) {
+/** to the mode's Remind phones: the daily reminder always; on / off changes only if they asked for them */
+private void guestNotice(String gid, String msg, boolean onOff = false) {
+    if (onOff && settings["gm_${gid}_notifyOnOff"] != true) return
     List devs = (settings["gm_${gid}_remindDevs"] ?: []) as List
     if (devs) pushTo(devs, msg, false)
 }

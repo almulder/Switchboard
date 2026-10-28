@@ -210,7 +210,8 @@ Per mode `<id>`:
   (`gm_<id>_switch`) / hub modes (`gm_<id>_modes`);
 - `gm_<id>_endDate` + `gm_<id>_endTime` and an "On until…" button; `gm_<id>_defaultHours` "If turned on another
   way (dashboard, rule), turn off after (hours)", default 24, 0 = stay on; `gm_<id>_remindTime` + reminder
-  notifiers `gm_<id>_remindDevs`.
+  notifiers `gm_<id>_remindDevs`. They get the daily reminder; on / off pushes only with `gm_<id>_notifyOnOff`
+  ("Also push to them when it turns on or off", default off; 0.8.3 — before, on / off always went to them).
 Guest Mode pills on the main page show each one that is on. On/off buttons per mode on the main page and on each
 Guest Mode's edit page.
 
@@ -250,7 +251,7 @@ dashboards, buttons and voice" (created / deleted on Done). The main page's "Rig
 known input name of that kind (an empty device picker is not in `settings.keySet()`): prof name, priority, spk,
 volMode, dayVol, nightVol, fixedVol, chime, dedupeSec, staleSec; ntf name, devs, when, dedupeSec, prefix, pushover;
 sir name, devs, maxMin; (all three) guestPlay, guestQuiet, guestOther; snd name, file, url, secs; gm name, source, switch,
-modes, endDate, endTime, defaultHours, remindTime, remindDevs.
+modes, endDate, endTime, defaultHours, remindTime, remindDevs, notifyOnOff.
 
 ## 4. Behaviour
 
