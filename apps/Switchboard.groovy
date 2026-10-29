@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.8.4 - 2026-10-28 - Notifications: "When" can also be someone away, all of picked people away, or any of picked people away.
  *  0.8.3 - 2026-10-27 - A mode's Remind phones get only the daily reminder, unless "Also push when it turns on or off" is ticked.
  *  0.8.2 - 2026-10-27 - The main page no longer lists every mode with on/off buttons (use the Modes page; modes that are on still show at the top).
  *  0.8.1 - 2026-10-27 - A mode is a plain mode unless you set it to Guest (was: Guest unless set to Other).
@@ -58,7 +59,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.8.3"
+@Field static final String APP_VERSION = "0.8.4"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -99,6 +100,8 @@ import java.util.concurrent.Semaphore
 
 @Field static final String TM_WARNING = "While Test Mode is on, alarms, sirens and announcements in the home are silenced — " +
     "a real emergency only reaches the testers' phones. Smoke alarms with their own sounders still sound."
+@Field static final Map<String, String> NTF_WHEN = [always: "Always", away: "Only when nobody is home", someoneAway: "Only when someone is away",
+                                                   allAway: "Only when all of these people are away", anyAway: "Only when any of these people is away"]
 @Field static final Map<String, String> TM_AUTO_OFF = ["15": "15 minutes", "30": "30 minutes", "60": "1 hour",
                                                        "120": "2 hours", "180": "3 hours", "240": "4 hours"]
 @Field static final String SND_URL_TIP = "A web address the speaker can play, e.g. an MP3 uploaded to the hub's File Manager: " +
@@ -339,7 +342,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
 /** every input an item's edit page can create, per kind (an empty device picker is not in settings.keySet(), so name them all) */
 @Field static final Map<String, List<String>> ITEM_INPUTS = [
     prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "sndVolMode", "sndDayVol", "sndNightVol", "sndFixedVol", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
-    ntf : ["name", "devs", "when", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
+    ntf : ["name", "devs", "when", "who", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
     gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs", "notifyOnOff"]
@@ -618,7 +621,7 @@ def notifyPage(params = null) {
                 String pre = "ntf_${nid}_"
                 int n = ((settings[pre + "devs"] ?: []) as List).size()
                 editRow("ntf", nid, esc(itemName("ntf", nid)) + (n ? "" : " " + uiPill("no devices", "warn")),
-                        [plural(n, "device"), settings[pre + "when"] == "away" ? "only when nobody is home" : "always"].join(" · "))
+                        [plural(n, "device"), whenText(nid)].join(" · "))
             }
         }
         addRow("ntf")
@@ -638,9 +641,12 @@ def notifyEditPage(params = null) {
                   multiple: true, required: false, submitOnChange: true
             if (((settings[pre + "devs"] ?: []) as List).size() != realDevs(settings[pre + "devs"]).size()) paragraph warn("Switchboard's own devices are ignored here. Pick real phones or notification devices.")
             if (!n) paragraph warn("Pick at least one device.")
-            input pre + "when", "enum", title: "When", defaultValue: "always", width: 6,
-                  options: [always: "Always", away: "Only when nobody is home"]
-            if (settings[pre + "when"] == "away" && !homeSensors) paragraph warn("Pick who is home in Settings, or this always sends.")
+            input pre + "when", "enum", title: "When", defaultValue: "always", width: 6, submitOnChange: true, options: NTF_WHEN
+            String w = (settings[pre + "when"] ?: "always") as String
+            if (w in ["allAway", "anyAway"]) {
+                input pre + "who", "capability.presenceSensor", title: "These people", multiple: true, required: false, submitOnChange: true, width: 6
+                if (!settings[pre + "who"]) paragraph warn("Pick at least one person, or this always sends.")
+            } else if (w != "always" && !homeSensors) paragraph warn("Pick who is home in Settings, or this always sends.")
             input pre + "dedupeSec", "number", title: "Skip the same message if it was sent in the last (seconds)", range: "0..3600", defaultValue: 15, width: 6
             input pre + "prefix", "text", title: "Text added before each message (optional)", required: false, width: 6
             input pre + "pushover", "bool", title: "Mark as high priority (Pushover [H])" + tip("Adds [H] in front of the message on Pushover devices only."), defaultValue: false
@@ -1151,7 +1157,7 @@ def settingsPage(params = null) {
             paragraph note("Now: " + (isNight() ? "night" : "day"))
         }
         section(uiTitle(null, "Who is home?")) {
-            input "homeSensors", "capability.presenceSensor", title: "Presence sensors" + tip("Used by notifications set to 'Only when nobody is home'. Nobody is home when none of these are present."),
+            input "homeSensors", "capability.presenceSensor", title: "Presence sensors" + tip("Used by notifications set to 'Only when nobody is home' (none of these present) or 'Only when someone is away' (any of these not present)."),
                   multiple: true, required: false
         }
         section(uiTitle(null, "Stopping alarms")) {
@@ -1611,8 +1617,8 @@ void sbNotify(String dni, String rawText) {
         routeToTesters(text, src ?: devName); entry.outcome = "test → testers"
     } else if (guestSkip("ntf_${nid}")) {
         entry.outcome = guestSkip("ntf_${nid}")
-    } else if (settings["ntf_${nid}_when"] == "away" && someoneHome()) {
-        entry.outcome = "skipped – someone home"
+    } else if (presenceSkip(nid)) {
+        entry.outcome = presenceSkip(nid)
     } else if (isDuplicate(dni, text, intSet("ntf_${nid}_dedupeSec", 15))) {
         entry.outcome = "skipped duplicate"
     } else {
@@ -2089,9 +2095,31 @@ private boolean isDuplicate(String dni, String body, Integer secs) {
     return false
 }
 
-private boolean someoneHome() {
-    List s = (homeSensors ?: []) as List
-    return s.any { it.currentValue("presence") == "present" }
+/** a notification's "When" as shown in the list */
+private String whenText(String nid) {
+    String w = (settings["ntf_${nid}_when"] ?: "always") as String
+    String t = (NTF_WHEN[w] ?: "Always").toLowerCase()
+    if (w in ["allAway", "anyAway"]) {
+        List who = (settings["ntf_${nid}_who"] ?: []) as List
+        t = t.replace("these people", who ? who*.displayName.join(", ") : "(nobody picked)")
+    }
+    return t
+}
+
+/** null = send; otherwise why the notification is skipped. Nobody picked = always send. */
+private String presenceSkip(String nid) {
+    String w = (settings["ntf_${nid}_when"] ?: "always") as String
+    if (w == "always") return null
+    List s = ((w in ["allAway", "anyAway"] ? settings["ntf_${nid}_who"] : homeSensors) ?: []) as List
+    if (!s) return null
+    int away = s.count { it.currentValue("presence") != "present" } as int
+    switch (w) {
+        case "away":        return away == s.size() ? null : "skipped – someone home"
+        case "someoneAway": return away ? null : "skipped – everyone home"
+        case "allAway":     return away == s.size() ? null : "skipped – not all of them away"
+        case "anyAway":     return away ? null : "skipped – all of them home"
+    }
+    return null
 }
 
 /** push to devices; [H] for Pushover devices when high. Returns how many accepted it. */

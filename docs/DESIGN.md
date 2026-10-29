@@ -137,7 +137,10 @@ Switchboard device name (other apps can't be queried).
 
 ### Notifications (each = one virtual notifier)
 `ntf_<id>_name`, `ntf_<id>_devs` (`capability.notification`, multiple), `ntf_<id>_when` always / away ("Only when
-nobody is home", uses `homeSensors` from Settings), `ntf_<id>_dedupeSec` (default 15), `ntf_<id>_guest`
+nobody is home") / someoneAway ("Only when someone is away"), both using `homeSensors` from Settings / allAway ("Only
+when all of these people are away") / anyAway ("Only when any of these people is away"), both using `ntf_<id>_who`
+(presence, multiple, shown only for those two). No sensors picked = always sends. The list shows the choice with the
+picked names. `ntf_<id>_dedupeSec` (default 15), `ntf_<id>_guest`
 normal / quiet / only, `ntf_<id>_prefix` (optional text added before each message), `ntf_<id>_pushover` bool
 "Mark as high priority (Pushover [H])". Test button.
 
@@ -232,7 +235,7 @@ duplicate / skipped stale / skipped guest / test → testers / failed, source). 
 by device and outcome; "Clear log" button.
 
 ### Settings
-`nightStart`, `nightEnd`; `homeSensors` (presence, for "only when nobody is home"); `defaultTrackSecs` "If a
+`nightStart`, `nightEnd`; `homeSensors` (presence, for "only when nobody is home" and "only when someone is away"); `defaultTrackSecs` "If a
 speaker doesn't report a track's length, assume (seconds)" (default 10; tip: only used for tracks Switchboard doesn't
 know the length of, and only when the speaker doesn't report it (Sonos does); it decides how long the next
 announcement waits and when the volume goes back; it never cuts a track short); `srcLookup` bool "Find which rule
