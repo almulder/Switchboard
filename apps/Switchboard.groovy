@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.8.5 - 2026-10-28 - Email keywords (Subject:, File:, To:, From:) pass through to email devices; phones get them stripped
+ *                       (subject as the first line); the log notes the subject and whether the File: photo is on the hub.
  *  0.8.4 - 2026-10-28 - Notifications: "When" can also be someone away, all of picked people away, or any of picked people away.
  *  0.8.3 - 2026-10-27 - A mode's Remind phones get only the daily reminder, unless "Also push when it turns on or off" is ticked.
  *  0.8.2 - 2026-10-27 - The main page no longer lists every mode with on/off buttons (use the Modes page; modes that are on still show at the top).
@@ -59,7 +61,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.8.4"
+@Field static final String APP_VERSION = "0.8.5"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -102,6 +104,8 @@ import java.util.concurrent.Semaphore
     "a real emergency only reaches the testers' phones. Smoke alarms with their own sounders still sound."
 @Field static final Map<String, String> NTF_WHEN = [always: "Always", away: "Only when nobody is home", someoneAway: "Only when someone is away",
                                                    allAway: "Only when all of these people are away", anyAway: "Only when any of these people is away"]
+/** Gmail Notification Device keywords: "Subject:x," etc. at the start of the message or after a comma; the value runs to the next comma */
+@Field static final String MAIL_KEY_RE = /(?:^|(?<=,))[ \t]*(To|From|Subject|File):([^,]*)(?:,|$)/
 @Field static final Map<String, String> TM_AUTO_OFF = ["15": "15 minutes", "30": "30 minutes", "60": "1 hour",
                                                        "120": "2 hours", "180": "3 hours", "240": "4 hours"]
 @Field static final String SND_URL_TIP = "A web address the speaker can play, e.g. an MP3 uploaded to the hub's File Manager: " +
@@ -648,7 +652,8 @@ def notifyEditPage(params = null) {
                 if (!settings[pre + "who"]) paragraph warn("Pick at least one person, or this always sends.")
             } else if (w != "always" && !homeSensors) paragraph warn("Pick who is home in Settings, or this always sends.")
             input pre + "dedupeSec", "number", title: "Skip the same message if it was sent in the last (seconds)", range: "0..3600", defaultValue: 15, width: 6
-            input pre + "prefix", "text", title: "Text added before each message (optional)", required: false, width: 6
+            input pre + "prefix", "text", title: "Text added before each message (optional)", required: false, submitOnChange: true, width: 6
+            if ((((settings[pre + "prefix"] ?: "") as String) =~ /(To|From|Subject|File):/).find()) paragraph warn("Don't put To:, From:, Subject: or File: in the prefix — email devices would read it as a keyword.")
             input pre + "pushover", "bool", title: "Mark as high priority (Pushover [H])" + tip("Adds [H] in front of the message on Pushover devices only."), defaultValue: false
         }
         section(uiTitle(null, "Modes")) {
@@ -1138,7 +1143,7 @@ private String logTable(List rows) {
         String kind = oc.startsWith("played") || oc.startsWith("sent") || oc == "off confirmed" ? "on" :
                       (oc.startsWith("failed") || oc in ["alert", "gave up"] ? "off" : (oc.startsWith("test") || oc.startsWith("queued") || oc == "retry" ? "warn" : "info"))
         h += "<tr><td style='white-space:nowrap'>${fmtShort(e.t as Long)}</td><td>${esc(e.dev as String)}</td>" +
-             "<td>${esc(e.kind as String)}: ${esc(e.text as String)}</td><td>${uiPill(oc, kind)}</td><td>${esc((e.source ?: '') as String)}</td></tr>"
+             "<td>${esc(e.kind as String)}: ${esc(e.text as String)}${e.note ? "<br><small>${esc(e.note as String)}</small>" : ""}</td><td>${uiPill(oc, kind)}</td><td>${esc((e.source ?: '') as String)}</td></tr>"
     }
     return h + "</table>"
 }
@@ -1613,8 +1618,11 @@ void sbNotify(String dni, String rawText) {
     childEvent(child, "lastMessage", text)
     if (src) childEvent(child, "lastSource", src)
 
+    String ptag = (text =~ /^\[[HLNES]\]/).find() ? text.take(3) : ""     // a rule's own Pushover tag stays first
+    String body = text.substring(ptag.length()).trim()
     if (isTestMode()) {
-        routeToTesters(text, src ?: devName); entry.outcome = "test → testers"
+        entry.note = mailNote(body)
+        routeToTesters(body, src ?: devName); entry.outcome = "test → testers"
     } else if (guestSkip("ntf_${nid}")) {
         entry.outcome = guestSkip("ntf_${nid}")
     } else if (presenceSkip(nid)) {
@@ -1624,9 +1632,8 @@ void sbNotify(String dni, String rawText) {
     } else {
         List devs = realDevs(settings["ntf_${nid}_devs"])
         String pfx = (settings["ntf_${nid}_prefix"] ?: "").toString().trim()
-        String ptag = (text =~ /^\[[HLNES]\]/).find() ? text.take(3) : ""     // a rule's own Pushover tag stays first
-        String msg = pfx ? "${ptag}${pfx} ${text.substring(ptag.length()).trim()}".toString() : text
-        int ok = pushTo(devs, msg, settings["ntf_${nid}_pushover"] == true)
+        entry.note = mailNote(body)
+        int ok = pushTo(devs, body, settings["ntf_${nid}_pushover"] == true, ptag + (pfx ? pfx + " " : ""))
         entry.outcome = ok ? "sent" : "failed"
     }
     addLog(entry)
@@ -2122,16 +2129,49 @@ private String presenceSkip(String nid) {
     return null
 }
 
-/** push to devices; [H] for Pushover devices when high. Returns how many accepted it. */
-private int pushTo(List devs, String msg, boolean high) {
+/** push lead + msg to devices; [H] for Pushover devices when high. Email devices get msg as is; others without email keywords. Returns how many accepted it. */
+private int pushTo(List devs, String msg, boolean high, String lead = "") {
     int ok = 0
     (devs ?: []).unique { it.id }.each { d ->
-        String m = msg
+        String m = (lead ?: "") + (isMailDev(d) ? msg : pushText(msg))
         if (high && !(m =~ /^\[[HLNES]\]/).find() && (d.typeName ?: "").toLowerCase().contains("pushover")) m = "[H]" + m
         try { d.deviceNotification(m); ok++ } catch (e) { log.error "${APP_TITLE}: notification failed on ${d.displayName}: ${e}" }
     }
     if (ok) logInfo "Push to ${devs*.displayName.join(', ')}: ${msg}"
     return ok
+}
+
+/** an email driver (e.g. Gmail Notification Device) reads Subject: / File: itself */
+private boolean isMailDev(d) { ((d?.typeName ?: "") as String).toLowerCase().contains("mail") }
+
+/** the first value of each email keyword in the text: [Subject: "…", File: "…"] */
+private Map mailParts(String text) {
+    Map r = [:]
+    if (!text) return r
+    def m = (text =~ MAIL_KEY_RE)
+    while (m.find()) { String k = m.group(1); if (r[k] == null) r[k] = ((m.group(2) ?: "") as String).trim() }
+    return r
+}
+
+/** for phones: email keywords removed, the subject kept as the first line */
+private String pushText(String msg) {
+    if (!msg || !(msg =~ MAIL_KEY_RE).find()) return msg
+    String s = msg.replaceAll(MAIL_KEY_RE) { all, String k, String v -> k == "Subject" && v?.trim() ? v.trim() + "\n" : "" }
+    return s.replaceAll(/[ \t]*\n[ \t]*/, "\n").trim()
+}
+
+/** log note: the email subject, and whether the File: photo is in File Manager now (checked before sending) */
+private String mailNote(String text) {
+    Map mp = mailParts(text)
+    List n = []
+    if (mp.Subject) n << "Subject: ${mp.Subject}"
+    if (mp.File) {
+        boolean ok = false
+        try { ok = downloadHubFile(mp.File as String) != null } catch (ignored) { }
+        n << (ok ? "📎 ${mp.File} found" : "⚠️ ${mp.File} not in File Manager — no photo")
+        if (!ok) log.warn "${APP_TITLE}: email photo ${mp.File} is not in File Manager"
+    }
+    return n ? n.join(" · ") : null
 }
 
 // ===================================================================== MESSAGE LOG
@@ -2317,7 +2357,7 @@ private void routeToTesters(String body, String source) {
     Long last = TM_RECENT[key]
     if (last != null && t - last < 2000L) { logDebug "Test Mode: '${body}' already sent to testers"; return }
     TM_RECENT[key] = t
-    pushTo((tmDevices ?: []) as List, "TEST – " + (source ? "${source}: " : "") + body, false)
+    pushTo((tmDevices ?: []) as List, body, false, "TEST – " + (source ? "${source}: " : ""))
 }
 private void testNotice(String msg) { pushTo((tmDevices ?: []) as List, msg, false) }
 

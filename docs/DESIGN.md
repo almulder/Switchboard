@@ -144,6 +144,19 @@ picked names. `ntf_<id>_dedupeSec` (default 15), `ntf_<id>_guest`
 normal / quiet / only, `ntf_<id>_prefix` (optional text added before each message), `ntf_<id>_pushover` bool
 "Mark as high priority (Pushover [H])". Test button.
 
+**Email keywords (0.8.5):** Gmail Notification Device (GCal Search app) reads `Subject:x,` `File:name.jpg,` `To:`
+`From:` anywhere in the text (value to the next comma) and attaches the File Manager file. Pistons delete that file
+right after sending (camera `clearImages()`), so notifications are delivered **synchronously** inside the rule's
+`deviceNotification` call (driver → parent device → `sbNotify` → `pushTo` → real device); never queue them.
+- Email devices (`typeName` contains "mail") get the text unchanged (only a `[Name] ` source tag is removed; the
+  prefix goes in front). Dedupe compares the full text, File: part included.
+- Other devices get `pushText`: keywords at the start or after a comma removed, the subject kept as the first line
+  (Test Mode copies too). The prefix, a `[H]` tag and "TEST – source: " are passed to `pushTo` as `lead`, so they
+  never hide a keyword at the start of the rule's text.
+- The log entry's `note` shows "Subject: …" and "📎 file found" / "⚠️ file not in File Manager — no photo" (checked
+  with `downloadHubFile` just before sending; a missing file is also a `log.warn`).
+- The edit page warns if the prefix contains a keyword.
+
 ### Sirens (each = one virtual siren)
 `sir_<id>_name`, `sir_<id>_devs` (`capability.alarm`, multiple, tip: some devices claim Alarm but aren't sirens, e.g.
 power monitors), `sir_<id>_maxMin` "Stop after (minutes)" default 5, `sir_<id>_guest` normal / quiet.
