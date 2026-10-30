@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.1 - 2026-10-29 - People: home network names and timings are stored as you type them, so Save uses them at once.
  *  1.0.0 - 2026-10-29 - People: one combined "Presence – <name> - SB" device per person (any source present or on home Wi-Fi =
  *                       home at once; away only when every fresh source agrees for the depart delay; stale sources
  *                       ignored), optional "Presence – Anyone Home - SB". Needs the new Switchboard Presence driver and
@@ -69,7 +70,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.0"
+@Field static final String APP_VERSION = "1.0.1"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -1265,16 +1266,16 @@ def personEditPage(params = null) {
             input pre + "wifiDev", "capability.presenceSensor", title: "Device that reports the Wi-Fi network (SSID)" + tip("E.g. the OwnTracks device (attributes SSID and dataConnection). On a home network = home at once. Off it never counts as away."),
                   required: false, submitOnChange: true, width: 6
             if (settings[pre + "wifiDev"]) {
-                (1..4).each { n -> input pre + "ssid${n}", "text", title: "Home network name ${n}", required: false, width: 3 }
+                (1..4).each { n -> input pre + "ssid${n}", "text", title: "Home network name ${n}", required: false, submitOnChange: true, width: 3 }
                 def w = pplWifiDev(id)
                 if (w) paragraph note("Now: SSID ${esc((w.currentValue('SSID') ?: '–') as String)} · ${esc((w.currentValue('dataConnection') ?: '–') as String)}")
             }
         }
         section(uiTitle(null, "Leaving and silent sources")) {
-            input pre + "departMin", "decimal", title: "Away after every source says away for (minutes)", range: "0..120", defaultValue: 2, width: 6
+            input pre + "departMin", "decimal", title: "Away after every source says away for (minutes)", range: "0..120", defaultValue: 2, submitOnChange: true, width: 6
             input pre + "staleHrs", "number", title: "Ignore a source that hasn't reported in (hours), 0 = never" +
                   tip("A source with no events for this long is left out of the decision, so a dead app can't keep someone home or block leaving. A phone geofence only reports when it changes: if it goes quiet while someone is home all day, it is simply left out."),
-                  range: "0..720", defaultValue: 12, width: 6
+                  range: "0..720", defaultValue: 12, submitOnChange: true, width: 6
             input pre + "staleNotify", "capability.notification", title: "Tell me when a source goes quiet (optional)", multiple: true, required: false
         }
         if (!draft) {
