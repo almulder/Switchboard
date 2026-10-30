@@ -18,6 +18,9 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.9.0 - 2026-10-29 - Stop all (HSM disarm / cancel, Stop All switch, button) stops everything queued or playing before the
+ *                       stop, normal words too; messages that arrive after it (the piston's "disarmed") play. Profile option
+ *                       "Don't resume what was playing". playSound names match with _ or spaces.
  *  0.8.5 - 2026-10-28 - Email keywords (Subject:, File:, To:, From:) pass through to email devices; phones get them stripped
  *                       (subject as the first line); the log notes the subject and whether the File: photo is on the hub.
  *  0.8.4 - 2026-10-28 - Notifications: "When" can also be someone away, all of picked people away, or any of picked people away.
@@ -61,7 +64,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.8.5"
+@Field static final String APP_VERSION = "0.9.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -116,6 +119,7 @@ import java.util.concurrent.Semaphore
 // ---- in-memory speech engine state, per app instance (cleared on hub reboot / code save)
 @Field static ConcurrentHashMap<Long, ConcurrentLinkedQueue<Map>> Q_NORMAL = new ConcurrentHashMap<>()
 @Field static ConcurrentHashMap<Long, ConcurrentLinkedQueue<Map>> Q_URGENT = new ConcurrentHashMap<>()
+@Field static ConcurrentHashMap<Long, Long> STOP_CUT = new ConcurrentHashMap<>()      // app id -> the last Stop all's cutoff (ms)
 @Field static ConcurrentHashMap<Long, ConcurrentHashMap<String, Map>> BUSY = new ConcurrentHashMap<>()     // resource -> [until, urgent, dni]
 @Field static ConcurrentHashMap<Long, ConcurrentHashMap<String, Map>> RESTORE = new ConcurrentHashMap<>()  // speakerId -> [dev, vol]
 @Field static ConcurrentHashMap<Long, Semaphore> LOCKS = new ConcurrentHashMap<>()
@@ -345,7 +349,7 @@ private List liveKeys(Map m) { m.findAll { k, v -> !(v instanceof Map && v.draft
 private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? one : (many ?: one + 's')}".toString() }
 /** every input an item's edit page can create, per kind (an empty device picker is not in settings.keySet(), so name them all) */
 @Field static final Map<String, List<String>> ITEM_INPUTS = [
-    prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "sndVolMode", "sndDayVol", "sndNightVol", "sndFixedVol", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
+    prof: ["name", "priority", "spk", "volMode", "dayVol", "nightVol", "fixedVol", "chime", "sndVolMode", "sndDayVol", "sndNightVol", "sndFixedVol", "noResume", "dedupeSec", "staleSec", "guestPlay", "guestQuiet", "guestOther"],
     ntf : ["name", "devs", "when", "who", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
@@ -586,6 +590,11 @@ def profileEditPage(params = null) {
                     input pre + "sndFixedVol", "number", title: "Sound volume", range: "0..100", defaultValue: 60, width: 3
                 }
             }
+        }
+        section(uiTitle(null, "After a message")) {
+            input pre + "noResume", "bool", title: "Don't resume what was playing before (music, an earlier sound)" +
+                  tip("Sounds use setVolume + playTrack instead of playTrackAndRestore, and words use setVolume + playText where the speaker has it. The volume still goes back. Good for alarm profiles: after a disarm nothing comes back."),
+                  defaultValue: false
         }
         section(uiTitle(null, "Skipping")) {
             input pre + "dedupeSec", "number", title: "Skip the same message if it was played in the last (seconds)" + tip("Stops a rule that fires twice from saying the same thing twice. 0 = never skip."),
@@ -1167,7 +1176,7 @@ def settingsPage(params = null) {
         }
         section(uiTitle(null, "Stopping alarms")) {
             input "stopOnDisarm", "bool", title: "When Safety Monitor is disarmed or cancels its alert, stop all sirens and sounds" +
-                  tip("Turns off every Switchboard siren, stops speakers playing an urgent message or a sound, and drops waiting sounds and urgent messages. Normal spoken messages (e.g. 'System disarmed') still play."),
+                  tip("Turns off every Switchboard siren, stops every speaker playing a Switchboard message or sound, and drops everything waiting. Messages that arrive after the disarm (e.g. a rule's 'System disarmed') still play."),
                   defaultValue: true
             if (isMissing("stop", "")) {
                 paragraph warn("The <b>${esc(STOP_LABEL)}</b> switch is missing (deleted outside Switchboard, or it couldn't be created). Recreate it, or turn the option below off.")
@@ -1478,9 +1487,11 @@ String soundName(String sid) {
     return cleanName(settings["snd_${sid}_name"] as String) ?: state.sounds[sid].name as String
 }
 Map soundOptions() { soundIds().collectEntries { [(it): soundName(it)] } }
+/** case, spaces, _ and - don't matter: "System Arming" finds "System_Arming" */
 private String soundByName(String name) {
-    String n = (name ?: "").trim().toLowerCase()
-    return n ? soundIds().find { soundName(it).toLowerCase() == n } : null
+    Closure norm = { String v -> (v ?: "").trim().toLowerCase().replaceAll(/[\s_\-]+/, " ") }
+    String n = norm(name)
+    return n ? soundIds().find { norm(soundName(it)) == n } : null
 }
 private String soundByUrl(String url) {
     String u = (url ?: "").trim()
@@ -1967,12 +1978,19 @@ void sirenTimeoutCheck() {
 // ===================================================================== STOPPING ALARMS
 
 /**
- * Stops everything Switchboard is sounding: sirens off, real speakers stopped (volume restored by the queue),
- * waiting urgent messages and waiting sounds / tracks dropped. Waiting normal text announcements are kept.
+ * Stops everything Switchboard is sounding: sirens off; every message queued before the stop dropped, and every
+ * speaker playing one stopped (volume restored by the queue), words included. Messages queued at or after 'at' (e.g. a
+ * piston's "disarmed" reacting to the same HSM event, whichever runs first) are kept and play.
  * Callers are all Switchboard's own runs (button, HSM event, Stop All switch event), so the real devices credit Switchboard.
  */
-void stopAll(String why) {
+void stopAll(String why, Long at = null) {
     String w = why ?: "Stop"
+    long t0 = now()
+    long cut = (at != null && at <= t0) ? at.longValue() : t0
+    Long prev = STOP_CUT.get(app.id)
+    if (prev != null && t0 - prev < 3000L && prev < cut) cut = prev       // HSM cancel + disarm: keep a message queued between them
+    STOP_CUT.put(app.id, cut)
+    Closure before = { Map m -> ((m?.queuedAt ?: 0L) as Long) < cut }
     // ---- sirens (maxMin 0 sirens have no timer, so the child's own state counts too)
     Map so = (atomicState.sirenOffAt ?: [:]) as Map
     int sirens = 0
@@ -1988,33 +2006,49 @@ void stopAll(String why) {
     }
     scheduleSirenCheck()
 
-    // ---- queue: drop waiting urgent items and waiting sounds / tracks; keep normal text announcements
+    // ---- queue: drop every item queued before the stop (one already part-played too).
+    //      Under the queue lock, so a queue pass already running can't start or re-mark an item we just removed.
     int dropped = 0
     Set<String> dnis = [] as Set
-    new ArrayList<Map>(qUrgent()).each { Map item ->
-        if (qUrgent().remove(item)) { stopDrop(item, w); dropped++; if (item.dni) dnis << (item.dni as String) }
-    }
-    new ArrayList<Map>(qNormal()).each { Map item ->
-        if ((item.sound || item.uri) && qNormal().remove(item)) { stopDrop(item, w); dropped++; if (item.dni) dnis << (item.dni as String) }
+    Set<String> cutOff = [] as Set              // labels of what was playing or waiting
+    List<String> spk = []
+    Semaphore lock = lockFor()
+    boolean got = false
+    try { got = lock.tryAcquire(4000L, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (ignored) { }
+    try {
+    [qUrgent(), qNormal()].each { q ->
+        new ArrayList<Map>(q).each { Map item ->
+            if (before(item) && q.remove(item)) {
+                stopDrop(item, w); dropped++
+                if (item.dni) dnis << (item.dni as String)
+                if (item.label) cutOff << (item.label as String)
+            }
+        }
     }
 
-    // ---- speakers playing an urgent item or a sound / track item: free them, then stop() the real ones
-    //      (a speaker playing a normal text announcement is left alone)
+    // ---- speakers playing an item queued before the stop: free them, then stop() the real ones
     ConcurrentHashMap<String, Map> busy = mapFor(BUSY)
     long t = now()
     Map byId = allSpeakers().collectEntries { [(it.id.toString()): it] }
-    List<String> spk = []
+    Set<String> cutIds = [] as Set
     new ArrayList<String>(busy.keySet()).each { String k ->
         Map b = busy[k]
-        if (!b || !b.alarm || (b.until as Long) <= t || !busy.remove(k, b)) return
+        if (!b || (b.until as Long) <= t || !before(b) || !busy.remove(k, b)) return
         if (b.dni) dnis << (b.dni as String)
+        if (b.label) cutOff << (b.label as String)
+        if (b.logId && cutIds.add(b.logId as String)) logSet(b.logId as String, [outcome: "cut off by ${w}".toString()])
         if (byId[k]) spk << k
     }
+    } finally { if (got) lock.release() }
 
     dnis.each { refreshStatus(it) }
     String summary = "Stop all (${w}): ${sirens} siren(s) off, ${spk.size()} speaker(s) stopped, ${dropped} waiting message(s) removed"
     if (sirens || spk || dropped) {
-        addLog([id: newLogId(), t: now(), dev: APP_TITLE, dni: "", kind: "stop", text: w, outcome: "stopped", source: ""])
+        List parts = []
+        if (cutOff) parts << "cut off: " + cutOff.collect { it.size() > 40 ? it.take(40) + "…" : it }.join(", ")
+        if (sirens) parts << plural(sirens, "siren") + " off"
+        addLog([id: newLogId(), t: now(), dev: APP_TITLE, dni: "", kind: "stop", text: "Stopped by ${w}".toString(), outcome: "stopped", source: "",
+                note: parts ? parts.join(" · ") : null])
         logInfo summary
     } else logDebug summary + " – nothing was sounding"
     // a pending queue run must not start a kept announcement before the stop() below reaches the speakers
@@ -2023,17 +2057,18 @@ void stopAll(String why) {
 }
 private void stopDrop(Map item, String why) {
     if (item.ukey) UKEYS.remove(item.ukey as String)
-    logSet(item.logId as String, [outcome: "stopped – ${why}".toString()])
+    logSet(item.logId as String, [outcome: "stopped by ${why}".toString()])
 }
 
 void hsmStopStatusHandler(evt) {
     if (settings.stopOnDisarm == false) return
-    if ((evt?.value as String) in ["disarmed", "allDisarmed"]) stopAll("Safety Monitor disarmed")
+    if ((evt?.value as String) in ["disarmed", "allDisarmed"]) stopAll("HSM disarm", evtTime(evt))
 }
 void hsmStopAlertHandler(evt) {
     if (settings.stopOnDisarm == false) return
-    if ((evt?.value as String) == "cancel") stopAll("Safety Monitor alert cancelled")
+    if ((evt?.value as String) == "cancel") stopAll("HSM alert cancelled", evtTime(evt))
 }
+private Long evtTime(evt) { try { return evt?.date?.time as Long } catch (ignored) { return null } }
 
 private String stopDni() { "SB-${app.id}-stopall".toString() }
 /** creates or deletes the Stop All switch to match the setting (initialize) */
@@ -2794,7 +2829,7 @@ private void queuePass() {
             if (item.ukey) UKEYS.remove(item.ukey as String)
             itemFinished(item)
         }
-        markBusy(busy, res, devs, end, true, item.dni as String, true)
+        markBusy(busy, res, devs, end, true, item, true)
         if (item.dni) touched << (item.dni as String)
         blocked.addAll(res)
         t = now()
@@ -2821,7 +2856,7 @@ private void queuePass() {
         if (wait) { blocked.addAll(res); return }
         long end = playItem(item, devs, false)
         if (itemDone(item)) { qNormal().remove(item); itemFinished(item) }
-        markBusy(busy, res, devs, end, false, item.dni as String, (item.sound || item.uri) as boolean)
+        markBusy(busy, res, devs, end, false, item, (item.sound || item.uri) as boolean)
         if (item.dni) touched << (item.dni as String)
         blocked.addAll(res)
         t = now()
@@ -2845,8 +2880,9 @@ private void queuePass() {
 }
 
 /** Mark resources busy until 'end'. In global mode speakers are also marked, so volume restore and stop() know which ones are in use. */
-private void markBusy(ConcurrentHashMap<String, Map> busy, List<String> res, List devs, long end, boolean urgent, String dni, boolean alarm) {
-    Map v = [until: end, urgent: urgent, dni: dni, alarm: alarm]       // alarm: urgent or a sound / track item (Stop all stops these)
+private void markBusy(ConcurrentHashMap<String, Map> busy, List<String> res, List devs, long end, boolean urgent, Map item, boolean alarm) {
+    Map v = [until: end, urgent: urgent, dni: item.dni as String, alarm: alarm,      // alarm: urgent or a sound / track item
+             queuedAt: item.queuedAt, logId: item.logId, label: item.label]       // Stop all cuts off items queued before it
     res.each { busy[it] = v }
     if (res == ["ALL"]) devs.each { busy[it.id.toString()] = v }
 }
@@ -2926,7 +2962,8 @@ private long playTrackOn(Map item, String url, BigDecimal secs, String name, Lis
     List played = [], later = []
     devs.each { dev ->
         try {
-            if (dev.hasCommand("playTrackAndRestore") && (settings["spkPlain_${dev.id}"] != true || !dev.hasCommand("playTrack"))) {
+            boolean plain = settings["spkPlain_${dev.id}"] == true || noResume(item)
+            if (dev.hasCommand("playTrackAndRestore") && (!plain || !dev.hasCommand("playTrack"))) {
                 // words follow at once: record the volume before the sound, so theirs can't pick up the sound's
                 if (vol != null && ((item.step ?: 0) as Integer) < ((item.parts ?: []) as List).size()) rememberVolume(dev)
                 if (vol != null) dev.playTrackAndRestore(url, vol)
@@ -3054,11 +3091,17 @@ private Integer parseTrackSecs(String v) {
 /** Speak text on all devices; returns the time (epoch ms) until which they are busy (0 if none spoke). */
 private long speakText(Map item, String text, List devs, Integer vol, boolean urgent) {
     List later = []                 // speakers that need setVolume first
+    Set plainText = [] as Set       // of those, the ones that get playText (no resume)
     int ok = 0
+    boolean noRes = noResume(item)
     devs.each { dev ->
         String m = methodFor(dev, vol)
         try {
-            if (m == "setThenSpeak") {
+            if (noRes && vol != null && dev.hasCommand("playText") && dev.hasCommand("setVolume")) {
+                rememberVolume(dev)
+                dev.setVolume(vol)
+                later << dev; plainText << dev.id.toString()
+            } else if (m == "setThenSpeak") {
                 rememberVolume(dev)
                 dev.setVolume(vol)
                 later << dev
@@ -3070,7 +3113,12 @@ private long speakText(Map item, String text, List devs, Integer vol, boolean ur
     if (later) {
         Integer d = later.collect { intSet("spkSetDelay_${it.id}", 700) }.max()
         if (d > 0) pauseExecution(Math.min(d, 3000))
-        later.each { dev -> try { dev.speak(text); ok++ } catch (e) { log.error "${APP_TITLE}: speak failed on ${dev.displayName}: ${e}" } }
+        later.each { dev ->
+            try {
+                if (plainText.contains(dev.id.toString())) dev.playText(text) else dev.speak(text)
+                ok++
+            } catch (e) { log.error "${APP_TITLE}: speak failed on ${dev.displayName}: ${e}" }
+        }
     }
     if (!ok) return 0L
     item.played = true
@@ -3121,6 +3169,9 @@ private boolean speakWith(dev, String m, String text, Integer vol, boolean urgen
     }
     return false
 }
+
+/** the item's profile is set to "Don't resume what was playing before" */
+private boolean noResume(Map item) { item?.profile && settings["prof_${item.profile}_noResume"] == true }
 
 private void rememberVolume(dev) {
     String id = dev.id.toString()

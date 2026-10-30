@@ -82,7 +82,7 @@ Accept every signature other apps use, all forwarded with `cmd` = the command na
 `playTextAndRestore(text[, volume])`, `playTextAndResume(text[, volume])`, `playTrack(uri[, volume])`,
 `playTrackAndRestore(uri[, volume])`, `playTrackAndResume(uri[, volume])`, `playAnnouncement(text[, volume[, …]])`
 (Echo Speaks style, extra args ignored), custom command `playSound(String name)` (a sound from the app's library by
-name), `setVolume(n)`, `volumeUp()`, `volumeDown()`, `mute()`, `unmute()`, `stop()`. MusicPlayer commands that make
+name; case, spaces, `_` and `-` are ignored, so "System Arming" finds "System_Arming"), `setVolume(n)`, `volumeUp()`, `volumeDown()`, `mute()`, `unmute()`, `stop()`. MusicPlayer commands that make
 no sense (`play`, `pause`, `nextTrack`, `previousTrack`, `setLevel`, `setTrack`, `restoreTrack`, `resumeTrack`)
 exist so pickers and rules don't error; they log "not used" (setLevel = setVolume).
 Attributes: `status` (idle / queued / playing), `volume` (the last volume a rule asked for), `mute`, `lastMessage`,
@@ -130,7 +130,9 @@ before (device first; the item stays if the hub refuses, with the error shown).
 `prof_<id>_priority` normal / urgent, volume: `prof_<id>_volMode` daynight / fixed / caller ("Use the volume the rule
 sends"), `prof_<id>_dayVol` (default 70), `prof_<id>_nightVol` (40), night window `nightStart`/`nightEnd` are global
 (Settings, default 21:00–08:00), `prof_<id>_fixedVol`; `prof_<id>_chime` (sound, optional, played before each text);
-`prof_<id>_dedupeSec` "Skip the same message if it was played in the last (seconds)" default 15; `prof_<id>_staleSec`
+`prof_<id>_noResume` "Don't resume what was playing before (music, an earlier sound)" (0.9.0, default off: sounds
+use setVolume + `playTrack` instead of `playTrackAndRestore`, words use setVolume + `playText` where the speaker has it;
+volume still restored); `prof_<id>_dedupeSec` "Skip the same message if it was played in the last (seconds)" default 15; `prof_<id>_staleSec`
 (normal only, default 30); `prof_<id>_guest` normal / quiet ("Stay silent during Guest Mode") / only; urgent profiles
 default normal and show "Safety alerts should keep playing during Guest Mode". Test button. "Used by" shows the
 Switchboard device name (other apps can't be queried).
@@ -265,7 +267,7 @@ dashboards, buttons and voice" (created / deleted on Done). The main page's "Rig
 
 **Draft / delete cleanup:** removing an item's settings removes every `<kind>_<id>_` key in `settings` *and* every
 known input name of that kind (an empty device picker is not in `settings.keySet()`): prof name, priority, spk,
-volMode, dayVol, nightVol, fixedVol, chime, dedupeSec, staleSec; ntf name, devs, when, dedupeSec, prefix, pushover;
+volMode, dayVol, nightVol, fixedVol, chime, sndVolMode, sndDayVol, sndNightVol, sndFixedVol, noResume, dedupeSec, staleSec; ntf name, devs, when, dedupeSec, prefix, pushover;
 sir name, devs, maxMin; (all three) guestPlay, guestQuiet, guestOther; snd name, file, url, secs; gm name, source, switch,
 modes, endDate, endTime, defaultHours, remindTime, remindDevs, notifyOnOff.
 
@@ -339,13 +341,18 @@ lives in memory, so messages still waiting at a reboot or code save are lost; th
 ("Safety Monitor disarmed") and `location hsmAlert` "cancel" ("Safety Monitor alert cancelled"). It:
 - turns off every Switchboard siren that is sounding (in `sirenOffAt`, or its virtual siren's alarm ≠ off / switch on):
   `off()` to its real sirens, clears its stop timer, sets the virtual siren's alarm / switch to off;
-- frees every speaker whose current Switchboard item is urgent or a sound / track item (any of its parts; `BUSY`
-  entries carry `alarm`) and sends `stop()` to those real ones (from Switchboard's own run), then runs the queue,
-  which restores volumes as usual; a speaker playing a normal text announcement (even its chime) is left alone;
-- drops every waiting urgent item and every waiting sound / track item (`playSound`, `playTrack`; a profile chime
-  before text doesn't count), log outcome "stopped – <why>"; waiting normal text announcements are kept (so
-  "System disarmed" is still spoken);
-- logs one entry (kind "stop", device "Switchboard", text = why, outcome "stopped") and an info line — only when
+- **0.9.0, cutoff:** everything *queued before* the stop goes, words included; anything queued at or after it stays
+  and plays. The cutoff is the HSM event's own time (`evt.date`) or now (button / switch), so a piston's
+  "disarmed" speak reacting to the same HSM event survives whether it runs before or after Switchboard's handler.
+  A second stop within 3 s keeps the first cutoff (HSM sends cancel + disarm). `BUSY` entries carry the item's
+  `queuedAt`, `logId`, `label`.
+- frees every speaker whose current item was queued before the cutoff and sends `stop()` to those real ones (from
+  Switchboard's own run), then runs the queue, which restores volumes as usual; that item's log outcome becomes
+  "cut off by <why>";
+- drops every waiting item queued before the cutoff (also one part-played), log outcome "stopped by <why>";
+- why = "HSM disarm", "HSM alert cancelled", "Stop all button", "Stop All switch";
+- logs one entry (kind "stop", device "Switchboard", text "Stopped by <why>", note "cut off: … · N sirens off",
+  outcome "stopped") and an info line — only when
   something was actually stopped (a siren, a speaker or a dropped waiting item); otherwise debug log only (so a
   cancel followed by a disarm makes one entry, and an everyday disarm makes none).
 
