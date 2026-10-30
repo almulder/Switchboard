@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.9.1 - 2026-10-29 - Main page: "Stop all now" description matches 0.9.0.
  *  0.9.0 - 2026-10-29 - Stop all (HSM disarm / cancel, Stop All switch, button) stops everything queued or playing before the
  *                       stop, normal words too; messages that arrive after it (the piston's "disarmed") play. Profile option
  *                       "Don't resume what was playing". playSound names match with _ or spaces.
@@ -64,7 +65,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.9.0"
+@Field static final String APP_VERSION = "0.9.1"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
@@ -294,7 +295,7 @@ def mainPage(params = null) {
             }
             paragraph queueStatus()
             input "btnStopAll", "button", title: "Stop all now", width: 4
-            paragraph note("Turns off every Switchboard siren, stops the speakers and drops waiting sounds and urgent messages.")
+            paragraph note("Turns off every Switchboard siren and stops every Switchboard message and sound, playing or waiting. Messages sent after it still play.")
         }
         section(uiTitle(null, "Latest messages")) {
             List l = logEntries()
