@@ -18,6 +18,10 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.0 - 2026-10-29 - People: one combined "Presence – <name> - SB" device per person (any source present or on home Wi-Fi =
+ *                       home at once; away only when every fresh source agrees for the depart delay; stale sources
+ *                       ignored), optional "Presence – Anyone Home - SB". Needs the new Switchboard Presence driver and
+ *                       Switchboard Parent 0.1.2.
  *  0.9.1 - 2026-10-29 - Main page: "Stop all now" description matches 0.9.0.
  *  0.9.0 - 2026-10-29 - Stop all (HSM disarm / cancel, Stop All switch, button) stops everything queued or playing before the
  *                       stop, normal words too; messages that arrive after it (the piston's "disarmed") play. Profile option
@@ -65,8 +69,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "0.9.1"
+@Field static final String APP_VERSION = "1.0.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
+@Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
 @Field static final List<List> RULE_SYSTEMS = [
     ["^webCoRE", "WC", "webCoRE"],
@@ -92,7 +97,8 @@ import java.util.concurrent.Semaphore
 @Field static final Map<String, Map> KINDS = [
     prof: [stateKey: "profiles",  dev: "spk", idp: "p", driver: "Switchboard Speaker",  label: "Announce – ", what: "Announcement Profile"],
     ntf : [stateKey: "notifiers", dev: "ntf", idp: "n", driver: "Switchboard Notifier", label: "Notify – ",   what: "notification"],
-    sir : [stateKey: "sirens",    dev: "snd", idp: "r", driver: "Switchboard Siren",    label: "Siren – ",    what: "siren"]
+    sir : [stateKey: "sirens",    dev: "snd", idp: "r", driver: "Switchboard Siren",    label: "Siren – ",    what: "siren"],
+    ppl : [stateKey: "people",    dev: "ppl", idp: "u", driver: "Switchboard Presence", label: "Presence – ", what: "person", suffix: " - SB"]
 ]
 
 @Field static final Map<String, String> SPEAK_METHODS = [
@@ -156,6 +162,8 @@ preferences {
     page(name: "testPage")
     page(name: "guestPage")
     page(name: "guestEditPage")
+    page(name: "peoplePage")
+    page(name: "personEditPage")
     page(name: "commitPage")
     page(name: "logPage")
     page(name: "settingsPage")
@@ -279,6 +287,7 @@ def mainPage(params = null) {
                                "Deleted outside Switchboard (or couldn't be created), so rules using ${miss.size() == 1 ? 'it' : 'them'} no longer reach Switchboard. Open each one to recreate or delete it.")
                 miss.each { Map m ->
                     if (m.kind == "stop") href name: "hrefMiss_stop", page: "settingsPage", title: "⚠ ${esc(m.label as String)}", description: "Recreate it, or turn the Stop All switch off"
+                    else if (m.kind == "any") href name: "hrefMiss_any", page: "peoplePage", title: "⚠ ${esc(m.label as String)}", description: "Recreate it, or turn it off"
                     else href name: "hrefMiss_${m.kind}_${m.id}", page: EDITS[m.kind as String].edit as String, params: [id: m.id], title: "⚠ ${esc(m.label as String)}", description: "Recreate or delete"
                 }
                 if (miss.size() > 1) input "btnRecreateAll", "button", title: "Recreate all", width: 4
@@ -311,6 +320,8 @@ def mainPage(params = null) {
             href "soundsPage", title: "Sound files", description: "Chimes and sounds to play · ${soundIds().size()} sound(s)"
             href "speakersPage", title: "Speakers & queue", description: "How each speaker speaks, queue timing · ${allSpeakers().size()} speaker(s)"
             href "testPage", title: "Test Mode", description: isTestMode() ? "ON" : "Off"
+            href "peoplePage", title: "People" + tip("One presence device per person that combines their phone app, OwnTracks and home Wi-Fi, e.g. 'Presence – Albert - SB'. Use it in pistons, HSM and the notification 'When' rules."),
+                 description: ids("ppl") ? ids("ppl").collect { "${itemName('ppl', it)}: ${pplPresence(it) == 'present' ? 'home' : (pplPresence(it) ? 'away' : '?')}" }.join(" · ") : "None yet"
             href "guestPage", title: "Modes", description: guestIds() ? "${plural(guestIds().size(), 'mode')}, ${guestsOn().size()} on" : "None yet"
             href "logPage", title: "Message log", description: "What was played, skipped or sent, and by which rule"
             href "settingsPage", title: "Settings", description: "Night time, who is home, stopping alarms, rule lookup, logging"
@@ -336,7 +347,8 @@ private String queueStatus() {
     ntf : [stateKey: "notifiers", idp: "n", list: "notifyPage",   edit: "notifyEditPage",  what: "notification", listTitle: "Notifications"],
     sir : [stateKey: "sirens",    idp: "r", list: "sirensPage",   edit: "sirenEditPage",   what: "siren",        listTitle: "Sirens"],
     snd : [stateKey: "sounds",    idp: "s", list: "soundsPage",   edit: "soundEditPage",   what: "sound",        listTitle: "Sound files"],
-    gm  : [stateKey: "guests",    idp: "g", list: "guestPage",    edit: "guestEditPage",   what: "Mode",         listTitle: "Modes"]
+    gm  : [stateKey: "guests",    idp: "g", list: "guestPage",    edit: "guestEditPage",   what: "Mode",         listTitle: "Modes"],
+    ppl : [stateKey: "people",    idp: "u", list: "peoplePage",   edit: "personEditPage",  what: "person",       listTitle: "People"]
 ]
 
 /** the kind's state map, drafts included (runtime code uses ids() / soundIds() / guestIds(), which leave drafts out) */
@@ -354,7 +366,8 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     ntf : ["name", "devs", "when", "who", "dedupeSec", "prefix", "pushover", "guestPlay", "guestQuiet", "guestOther"],
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
-    gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs", "notifyOnOff"]
+    gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs", "notifyOnOff"],
+    ppl : ["name", "srcs", "wifiDev", "ssid1", "ssid2", "ssid3", "ssid4", "departMin", "staleHrs", "staleNotify"]
 ]
 private void removeItemSettings(String kind, String id) {
     String pre = "${kind}_${id}_".toString()
@@ -511,12 +524,12 @@ private void saveItem(String kind, String id) {
         if (kind == "snd") v = [name: n, url: u, secs: soundSecs(id)]
         m[id] = v
         state[e.stateKey as String] = m
-        if (KINDS[kind]) ensureDevice(kind, id, n)
+        if (KINDS[kind]) { ensureDevice(kind, id, n); if (kind == "ppl") initPeople() }
         else if (kind == "gm") { ensureGuestSwitch(id); initGuests() }      // subscribes hub modes too, no Done needed
         state["savedNew_${kind}".toString()] = [id: id, at: now()]
         logInfo "Added ${e.what} '${n}'"
     } else {
-        if (KINDS[kind]) syncNames()
+        if (KINDS[kind]) { syncNames(); if (kind == "ppl") initPeople() }
         else if (kind == "snd") syncSounds()
         else { syncGuests(); ensureGuestSwitch(id); initGuests() }
     }
@@ -1172,7 +1185,7 @@ def settingsPage(params = null) {
             paragraph note("Now: " + (isNight() ? "night" : "day"))
         }
         section(uiTitle(null, "Who is home?")) {
-            input "homeSensors", "capability.presenceSensor", title: "Presence sensors" + tip("Used by notifications set to 'Only when nobody is home' (none of these present) or 'Only when someone is away' (any of these not present)."),
+            input "homeSensors", "capability.presenceSensor", title: "Presence sensors" + tip("Used by notifications set to 'Only when nobody is home' (none of these present) or 'Only when someone is away' (any of these not present). Pick the People devices (Presence – name - SB) so everything agrees on who is home."),
                   multiple: true, required: false
         }
         section(uiTitle(null, "Stopping alarms")) {
@@ -1202,6 +1215,79 @@ def settingsPage(params = null) {
             input "logEnable", "bool", title: "Debug logging (turns off after 30 minutes)", defaultValue: false
             input "txtEnable", "bool", title: "Description logging", defaultValue: true
         }
+    }
+}
+
+// ------------------------------------------------------------------ People
+def peoplePage(params = null) {
+    state.remove("confirmDel")
+    syncNames()
+    dynamicPage(name: "peoplePage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
+        section {
+            paragraph pageHead("People", "${APP_TITLE} · Setup")
+            paragraph uiHint("One presence device per person, <b>Presence – name - SB</b>. Home at once when any source says present or the phone is on home Wi-Fi; away only when every source agrees for the depart delay. Switchboard never changes the real sources.")
+            if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
+            if (!ids("ppl")) paragraph uiHint("None yet.")
+            ids("ppl").each { String id ->
+                String pr = pplPresence(id)
+                List stale = (pplStatus(id).stale ?: []) as List
+                editRow("ppl", id, esc(itemName("ppl", id)) + " " + uiPill(pr == "present" ? "home" : (pr ? "away" : "?"), pr == "present" ? "on" : "info") +
+                        (stale ? " " + uiPill("no report: ${stale.join(', ')}", "warn") : ""),
+                        (sbChild(itemDni("ppl", id))?.currentValue("reason") ?: "") as String)
+            }
+        }
+        addRow("ppl")
+        section(uiTitle(null, "Anyone home")) {
+            input "pplAnyoneOn", "bool", title: "Create '${ANY_LABEL}'" + tip("Present while any person above is present. One device for pistons and HSM to check."),
+                  defaultValue: false, submitOnChange: true
+            if (settings.pplAnyoneOn == true) {
+                syncAnyone()
+                def a = sbChild(anyDni())
+                if (a) paragraph note("Now: ${a.currentValue('presence') ?: '?'} · ${a.currentValue('reason') ?: ''}")
+            } else if (sbChild(anyDni()) || state.anyMade) syncAnyone()
+        }
+    }
+}
+
+def personEditPage(params = null) {
+    String id = editTarget("ppl", params)
+    dynamicPage(name: "personEditPage", title: "", install: false, uninstall: false, nextPage: "commitPage") {
+        if (!editHead("ppl", id)) return
+        boolean draft = isDraft("ppl", id)
+        String pre = "ppl_${id}_"
+        section(uiTitle(null, "Person")) {
+            input pre + "name", "text", title: "Name" + tip("The device is called 'Presence – name - SB'."), submitOnChange: true, width: 6
+            input pre + "srcs", "capability.presenceSensor", title: "Sources" + tip("Every presence sensor for this person, e.g. the Hubitat phone app presence and OwnTracks. Any of them present = home."),
+                  multiple: true, required: false, submitOnChange: true
+            if (!realDevs(settings[pre + "srcs"])) paragraph warn("Pick at least one source. Home Wi-Fi only ever says 'home', so it can't decide when someone leaves.")
+        }
+        section(uiTitle(null, "Home Wi-Fi")) {
+            input pre + "wifiDev", "capability.presenceSensor", title: "Device that reports the Wi-Fi network (SSID)" + tip("E.g. the OwnTracks device (attributes SSID and dataConnection). On a home network = home at once. Off it never counts as away."),
+                  required: false, submitOnChange: true, width: 6
+            if (settings[pre + "wifiDev"]) {
+                (1..4).each { n -> input pre + "ssid${n}", "text", title: "Home network name ${n}", required: false, width: 3 }
+                def w = pplWifiDev(id)
+                if (w) paragraph note("Now: SSID ${esc((w.currentValue('SSID') ?: '–') as String)} · ${esc((w.currentValue('dataConnection') ?: '–') as String)}")
+            }
+        }
+        section(uiTitle(null, "Leaving and silent sources")) {
+            input pre + "departMin", "decimal", title: "Away after every source says away for (minutes)", range: "0..120", defaultValue: 2, width: 6
+            input pre + "staleHrs", "number", title: "Ignore a source that hasn't reported in (hours), 0 = never" +
+                  tip("A source with no events for this long is left out of the decision, so a dead app can't keep someone home or block leaving. A phone geofence only reports when it changes: if it goes quiet while someone is home all day, it is simply left out."),
+                  range: "0..720", defaultValue: 12, width: 6
+            input pre + "staleNotify", "capability.notification", title: "Tell me when a source goes quiet (optional)", multiple: true, required: false
+        }
+        if (!draft) {
+            section(uiTitle(null, "Right now")) {
+                Map st = pplStatus(id)
+                def c = sbChild(itemDni("ppl", id))
+                paragraph note("<b>${esc((c?.currentValue('presence') ?: '?') as String)}</b> · ${esc((c?.currentValue('reason') ?: '') as String)}<br>${esc(st.summary as String)}")
+                if (st.stale) paragraph warn("No report for over ${intSet(pre + 'staleHrs', 12)} h, left out: ${esc((st.stale as List).join(', '))}")
+                if ((state.pplOverride ?: [:])[id]) paragraph note("Set by hand with arrived() / departed(); the next change from a source takes over again.")
+                paragraph note("Used by: pistons, HSM and notifications that use <b>${esc(deviceLabel('ppl', id))}</b>.")
+            }
+        }
+        editFoot("ppl", id)
     }
 }
 
@@ -1288,7 +1374,7 @@ String itemName(String kind, String id) {
     cleanName(settings["${kind}_${id}_name"] as String) ?: (itemMap(kind)[id]?.name ?: id) as String
 }
 String itemDni(String kind, String id) { "SB-${app.id}-${KINDS[kind].dev}-${id}".toString() }
-String deviceLabel(String kind, String id) { "${KINDS[kind].label}${itemName(kind, id)}".toString() }
+String deviceLabel(String kind, String id) { "${KINDS[kind].label}${itemName(kind, id)}${KINDS[kind].suffix ?: ''}".toString() }
 /** "SB-<appId>-spk-p1" → [kind: "prof", id: "p1"], or null */
 private Map parseDni(String dni) {
     List p = (dni ?: "").split("-") as List
@@ -1357,6 +1443,7 @@ List<Map> missingDevices() {
     KINDS.keySet().each { String kind -> ids(kind).each { String id -> if (isMissing(kind, id, have)) out << [kind: kind, id: id, label: deviceLabel(kind, id)] } }
     guestIds().each { String gid -> if (isMissing("gm", gid, have)) out << [kind: "gm", id: gid, label: gmSwitchLabel(gid)] }
     if (isMissing("stop", "", have)) out << [kind: "stop", id: "", label: STOP_LABEL]
+    if (isMissing("any", "", have)) out << [kind: "any", id: "", label: ANY_LABEL]
     return out
 }
 /** DNIs of the parent's children, read once (each sbChild is a call into the parent driver) */
@@ -1364,6 +1451,7 @@ private Set<String> childDnis() { (((hubDev()?.sbChildren() ?: []) as List).coll
 boolean isMissing(String kind, String id, Set<String> have = null) {
     if (have == null) have = childDnis()
     if (kind == "stop") return settings.stopSwitchOn != false && state.stopMade == true && !have.contains(stopDni())
+    if (kind == "any") return settings.pplAnyoneOn == true && state.anyMade == true && !have.contains(anyDni())
     if (kind == "gm") return rawMap("gm").containsKey(id) && !isDraft("gm", id) && gmSrc(id) == "create" && gmMade(id) && !have.contains(gmDni(id))
     return KINDS[kind] != null && rawMap(kind).containsKey(id) && !isDraft(kind, id) && !have.contains(itemDni(kind, id))
 }
@@ -1379,8 +1467,9 @@ private void recreateDevice(String kind, String id, boolean one = true) {
     def d
     String label
     if (kind == "stop") { d = createStopSwitch(); label = STOP_LABEL }
+    else if (kind == "any") { d = createAnyone(); label = ANY_LABEL; if (d) syncAnyone() }
     else if (kind == "gm") { ensureGuestSwitch(id, true, true); d = sbChild(gmDni(id)); label = gmSwitchLabel(id); if (d) initGuests() }
-    else if (KINDS[kind]) { d = ensureDevice(kind, id); label = deviceLabel(kind, id) }
+    else if (KINDS[kind]) { d = ensureDevice(kind, id); label = deviceLabel(kind, id); if (d && kind == "ppl") initPeople() }
     if (d) {
         if (one) state.okMsg = "Recreated \"${label}\". It's a new device: point the rules that used the old one at it again" +
                                " (and tick it in webCoRE's available devices)."
@@ -1403,7 +1492,7 @@ private def ensureDevice(String kind, String id, String name = null) {
     String dni = itemDni(kind, id)
     def d = sbChild(dni)
     if (d) return d
-    String label = "${KINDS[kind].label}${name ?: itemName(kind, id)}".toString()
+    String label = "${KINDS[kind].label}${name ?: itemName(kind, id)}${KINDS[kind].suffix ?: ''}".toString()
     try {
         d = sbAddChild(KINDS[kind].driver as String, dni, label)
     } catch (e) {
@@ -1428,6 +1517,7 @@ private void deleteItem(String kind, String id) {
     m.remove(id)
     state[KINDS[kind].stateKey as String] = m
     removeItemSettings(kind, id)
+    if (kind == "ppl") { pplForget(id); syncAnyone() }
 }
 
 /** names from settings → state, relabel devices (missing ones are left for Recreate) */
@@ -2103,6 +2193,235 @@ void stopSwitchHandler(evt) {
 void stopSwitchReset() {
     def d = sbChild(stopDni())
     if (d && d.currentValue("switch") == "on") { try { d.off() } catch (e) { log.warn "${APP_TITLE}: couldn't turn off '${STOP_LABEL}': ${e}" } }
+}
+
+// ===================================================================== PEOPLE (combined presence)
+
+private String anyDni() { "SB-${app.id}-anyhome".toString() }
+private String pplPresence(String id) { sbChild(itemDni("ppl", id))?.currentValue("presence") as String }
+private def pplWifiDev(String id) { def w = settings["ppl_${id}_wifiDev"]; return w ? realDevs([w])[0] : null }
+private List<String> pplSsids(String id) {
+    (1..4).collect { n -> ((settings["ppl_${id}_ssid${n}"] ?: "") as String).trim().toLowerCase() }.findAll { it }
+}
+/** "# Phone - Albert's" → "Phone" */
+private String pplShort(d) { (((d?.displayName ?: "") as String).replaceAll(/^#\s*/, "").split(/\s+-\s+/)[0] ?: "source").trim() }
+private boolean pplStale(d, long staleMs) {
+    if (staleMs <= 0) return false
+    Long last = null
+    try { last = d.getLastActivity()?.time as Long } catch (ignored) { }
+    return last != null && now() - last > staleMs
+}
+
+/** [present, fresh (sources still reporting), wifiOk (Wi-Fi device still reporting), wifi (on home Wi-Fi), reason, summary, stale names] */
+private Map pplStatus(String id) {
+    long staleMs = intSet("ppl_${id}_staleHrs", 12) * 3600000L
+    List parts = [], presentBy = [], stale = []
+    int fresh = 0
+    List srcs = realDevs(settings["ppl_${id}_srcs"])
+    srcs.each { d ->
+        String nm = pplShort(d)
+        if (pplStale(d, staleMs)) { stale << (d.displayName as String); parts << "${nm}: no report"; return }
+        fresh++
+        boolean p = d.currentValue("presence") == "present"
+        if (p) presentBy << nm
+        parts << "${nm}: ${p ? 'present' : 'away'}"
+    }
+    boolean wifi = false, wifiOk = false
+    def w = pplWifiDev(id)
+    String ssid = null
+    if (w) {
+        wifiOk = !pplStale(w, staleMs)
+        if (wifiOk) {
+            ssid = (w.currentValue("SSID") ?: "") as String
+            String dc = (w.currentValue("dataConnection") ?: "") as String
+            wifi = ssid && pplSsids(id).contains(ssid.trim().toLowerCase()) && !dc.toLowerCase().contains("mobile")
+            parts << "Wi-Fi: " + (wifi ? "home (${ssid})" : (dc ? dc : "off home"))
+        } else if (!srcs.any { it.id == w.id }) stale << (w.displayName as String)
+    }
+    String reason
+    if (wifi) reason = "${pplShort(w)} on home Wi-Fi" + (presentBy ? ", ${presentBy.join(' and ')} present" : "")
+    else if (presentBy) reason = "${presentBy.join(' and ')} present"
+    else if (!fresh) reason = "No source has reported lately"
+    else reason = "All sources away"
+    return [present: wifi || presentBy as boolean, fresh: fresh, wifiOk: wifiOk, wifi: wifi, reason: reason,
+            summary: parts.join(", "), stale: stale]
+}
+
+/** subscriptions, Anyone Home, and every person recomputed (initialize, and after a person is saved) */
+private void initPeople() {
+    Set<String> seen = [] as Set
+    ids("ppl").each { String id ->
+        realDevs(settings["ppl_${id}_srcs"]).each { d -> if (seen.add("presence|${d.id}".toString())) subscribe(d, "presence", "pplSourceHandler") }
+        def w = pplWifiDev(id)
+        if (w) ["SSID", "dataConnection", "presence"].each { String a -> if (seen.add("${a}|${w.id}".toString())) subscribe(w, a, "pplSourceHandler") }
+    }
+    unschedule("pplStaleCheck")
+    if (ids("ppl")) runEvery15Minutes("pplStaleCheck")
+    syncAnyone()
+    ids("ppl").each { pplEvaluate(it as String) }
+    pplTimerSchedule()
+}
+
+/** a real source changed: a hand-set presence gives way, then the person is recomputed */
+void pplSourceHandler(evt) {
+    String did = evt?.device?.id?.toString()
+    ids("ppl").each { String id ->
+        boolean uses = realDevs(settings["ppl_${id}_srcs"]).any { it.id.toString() == did } || pplWifiDev(id)?.id?.toString() == did
+        if (!uses) return
+        Map ov = (state.pplOverride ?: [:]) as Map
+        if (ov.remove(id) != null) state.pplOverride = ov
+        pplEvaluate(id)
+    }
+    pplTimerSchedule()
+}
+
+/** decides one person's presence: present at once; away only after every fresh source says away for the depart delay */
+private void pplEvaluate(String id) {
+    def c = sbChild(itemDni("ppl", id))
+    Map dep = (state.pplDepart ?: [:]) as Map
+    if (!c) { if (dep.remove(id) != null) state.pplDepart = dep; return }          // device missing: no timer left behind
+    Map st = pplStatus(id)
+    if (c.currentValue("sources") != st.summary) childEvent(c, "sources", st.summary)
+    String hw = st.wifi ? "true" : "false"
+    if (c.currentValue("onHomeWifi") != hw) childEvent(c, "onHomeWifi", hw)
+    if (((state.pplOverride ?: [:]) as Map)[id]) return
+    String cur = c.currentValue("presence") as String
+    if (st.present) {
+        if (dep.remove(id) != null) { state.pplDepart = dep; logInfo "${itemName('ppl', id)}: leaving cancelled (${st.reason})" }
+        if (cur != "present") pplSet(id, "present", st.reason as String)
+        else if (c.currentValue("reason") != st.reason) childEvent(c, "reason", st.reason)
+        return
+    }
+    if (!st.fresh) {                                     // no source reporting (Wi-Fi never votes away): keep what we have
+        if (dep.remove(id) != null) state.pplDepart = dep
+        if (c.currentValue("reason") != st.reason) childEvent(c, "reason", st.reason)
+        return
+    }
+    if (cur == null || cur == "not present") {
+        if (dep.remove(id) != null) state.pplDepart = dep
+        if (cur == null) pplSet(id, "not present", st.reason as String)               // a new device starts from the sources
+        return
+    }
+    BigDecimal mins = (settings["ppl_${id}_departMin"] != null ? settings["ppl_${id}_departMin"] : 2) as BigDecimal
+    Long due = dep[id] as Long
+    if (due == null) {
+        due = now() + (long) (mins * 60000)
+        if (due <= now()) { pplSet(id, "not present", "All sources away"); return }
+        dep[id] = due; state.pplDepart = dep
+        childEvent(c, "reason", "All sources away, leaving in ${mins.stripTrailingZeros().toPlainString()} min unless one comes back")
+        logInfo "${itemName('ppl', id)}: all sources away, waiting ${mins.stripTrailingZeros().toPlainString()} min"
+    } else if (now() >= due - 500L) {
+        dep.remove(id); state.pplDepart = dep
+        pplSet(id, "not present", "All sources away for ${mins.stripTrailingZeros().toPlainString()} min")
+    }
+}
+
+/** sets the person's presence (only called on a change), logs it, updates Anyone Home */
+private void pplSet(String id, String value, String reason) {
+    def c = sbChild(itemDni("ppl", id))
+    if (!c) return
+    boolean home = value == "present"
+    childEvent(c, "presence", value)
+    childEvent(c, "reason", reason)
+    childEvent(c, home ? "lastArrived" : "lastDeparted", fmtShort(now()))
+    String n = itemName("ppl", id)
+    addLog([id: newLogId(), t: now(), dev: deviceLabel("ppl", id), dni: c.deviceNetworkId as String, kind: "presence",
+            text: home ? "${n} arrived".toString() : "${n} left".toString(), outcome: home ? "present" : "away", source: "", note: reason])
+    syncAnyone()
+}
+
+/** the earliest pending departure */
+private void pplTimerSchedule() {
+    Map dep = (state.pplDepart ?: [:]) as Map
+    Long next = dep.values().collect { it as Long }.min()
+    if (next == null) { unschedule("pplTimer"); return }
+    runIn(Math.max(1L, (long) Math.ceil((next - now()) / 1000.0)), "pplTimer")
+}
+void pplTimer() {
+    Map dep = (state.pplDepart ?: [:]) as Map
+    dep.findAll { k, v -> (v as Long) <= now() + 500L }.keySet().each { String id -> pplEvaluate(id) }
+    pplTimerSchedule()
+}
+
+/** every 15 min: a source going quiet may let a departure happen (or warn), so recompute everyone */
+void pplStaleCheck() {
+    Map sent = (state.pplStaleSent ?: [:]) as Map
+    ids("ppl").each { String id ->
+        Map st = pplStatus(id)
+        List names = (st.stale ?: []) as List
+        names.each { String nm ->
+            String k = "${id}|${nm}".toString()
+            if (sent[k]) return
+            sent[k] = now()
+            String msg = "${nm} for ${itemName('ppl', id)} hasn't reported in ${intSet("ppl_${id}_staleHrs", 12)} h"
+            log.warn "${APP_TITLE}: ${msg}"
+            List to = (settings["ppl_${id}_staleNotify"] ?: []) as List
+            to.each { d -> try { d.deviceNotification(msg) } catch (e) { log.warn "${APP_TITLE}: couldn't send to ${d.displayName}: ${e}" } }
+        }
+        sent.keySet().findAll { (it as String).startsWith("${id}|") && !names.contains((it as String).substring(id.length() + 1)) }.toList().each { sent.remove(it) }
+        pplEvaluate(id)
+    }
+    state.pplStaleSent = sent
+    pplTimerSchedule()
+}
+
+/** arrived() / departed() on a Presence device: set by hand until a real source changes */
+void sbPresence(String dni, String value) {
+    runInMillis(50, "sbPresenceEvent", [data: [dni: dni, value: value], overwrite: false])
+}
+void sbPresenceEvent(Map data) {
+    String dni = (data?.dni ?: "") as String
+    String v = data?.value == "present" ? "present" : "not present"
+    if (dni == anyDni()) { logInfo "${ANY_LABEL} follows its people; arrived() / departed() ignored"; syncAnyone(); return }
+    Map k = parseDni(dni)
+    if (!k || k.kind != "ppl") return
+    String id = k.id as String
+    Map ov = (state.pplOverride ?: [:]) as Map; ov[id] = v; state.pplOverride = ov
+    Map dep = (state.pplDepart ?: [:]) as Map
+    if (dep.remove(id) != null) { state.pplDepart = dep; pplTimerSchedule() }
+    if (pplPresence(id) != v) pplSet(id, v, "Set by hand (${v == 'present' ? 'arrived' : 'departed'})")
+}
+
+private void pplForget(String id) {
+    Map ov = (state.pplOverride ?: [:]) as Map; ov.remove(id); state.pplOverride = ov
+    Map dep = (state.pplDepart ?: [:]) as Map; dep.remove(id); state.pplDepart = dep
+    Map sent = (state.pplStaleSent ?: [:]) as Map
+    sent.keySet().findAll { (it as String).startsWith("${id}|") }.toList().each { sent.remove(it) }
+    state.pplStaleSent = sent
+    pplTimerSchedule()
+}
+
+/** Anyone Home: created / deleted to match the setting (made once; deleted later = missing), present while any person is */
+private void syncAnyone() {
+    String dni = anyDni()
+    def d = sbChild(dni)
+    if (settings.pplAnyoneOn != true) {
+        if (d) {
+            try { sbDeleteChild(dni); state.remove("anyMade") } catch (e) {
+                state.pageErr = "Couldn't delete \"${ANY_LABEL}\". If a rule uses it, remove it there first. (${e.message})"
+            }
+        } else state.remove("anyMade")
+        return
+    }
+    if (!d && state.anyMade != true) d = createAnyone()
+    if (!d) return
+    List home = ids("ppl").findAll { pplPresence(it as String) == "present" }.collect { itemName("ppl", it as String) }
+    String v = home ? "present" : "not present"
+    String why = home ? "${home.join(' and ')} home" : (ids("ppl") ? "Nobody home" : "No people set up")
+    if (d.currentValue("presence") != v) {
+        childEvent(d, "presence", v)
+        childEvent(d, v == "present" ? "lastArrived" : "lastDeparted", fmtShort(now()))
+        addLog([id: newLogId(), t: now(), dev: ANY_LABEL, dni: dni, kind: "presence", text: v == "present" ? "Someone home" : "Nobody home",
+                outcome: v == "present" ? "present" : "away", source: "", note: why])
+    }
+    if (d.currentValue("reason") != why) childEvent(d, "reason", why)
+}
+private def createAnyone() {
+    def d = null
+    try { d = sbAddChild(KINDS.ppl.driver as String, anyDni(), ANY_LABEL) }
+    catch (e) { log.error "${APP_TITLE}: couldn't create '${ANY_LABEL}': ${e}"; if (hubDev()) state.pageErr = "Couldn't create \"${ANY_LABEL}\". Is the \"Switchboard Presence\" driver installed? (${e.message})" }
+    if (d) state.anyMade = true
+    return d
 }
 
 // ===================================================================== DELIVERY HELPERS
@@ -3287,6 +3606,9 @@ void initialize() {
 
     // ---- Guest Modes
     initGuests()
+
+    // ---- People: subscribe to their sources, recompute presence (no events when nothing changed)
+    initPeople()
 
     // ---- sirens still sounding, and sirens still being checked after an off (the check survives a reboot / Done)
     scheduleSirenCheck()

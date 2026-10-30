@@ -16,6 +16,7 @@ Goals: simple to set up, no changes to how people write rules, nothing silently 
 | `drivers/Switchboard_Siren.groovy` | driver "Switchboard Siren" | virtual siren |
 | `drivers/Switchboard_Parent.groovy` | driver "Switchboard Parent" | the one "Switchboard" device; every other device is its child |
 | `drivers/Switchboard_Switch.groovy` | driver "Switchboard Switch" | Stop All and Guest Mode switches |
+| `drivers/Switchboard_Presence.groovy` | driver "Switchboard Presence" | People devices and Anyone Home (1.0.0) |
 
 The drivers start at **0.1.0**. Header, author and licence like Rule Forge (PolyForm Noncommercial 1.0.0).
 
@@ -243,6 +244,30 @@ Rule, checked for each message: (1) any `_guestPlay` mode on → deliver (**Play
 `_guestQuiet` mode on → skip; (3) else follow `_guestOther`. Several Guest Modes can be on at once and share devices.
 Urgent profiles show the hint "Safety alerts should keep playing during Guest Mode". (Replaces the single `_guest`
 setting and `_guestOnly`.)
+
+### People (1.0.0) — one combined presence device per person
+Why: each person had two presence sources that disagree (Hubitat phone-app geofence, OwnTracks); webCoRE helper
+pistons forced them into sync with arrived() / departed(), so a glitch could mark someone away and auto-arm HSM.
+Switchboard reads the sources and never writes to them.
+- Kind `ppl` (ids `u1`…, `state.people`), device "Presence – <name> - SB" (driver **Switchboard Presence**:
+  PresenceSensor, commands arrived() / departed(), attributes reason, lastArrived, lastDeparted, onHomeWifi,
+  sources). List page `peoplePage`, edit page `personEditPage`.
+- Inputs: `ppl_<id>_srcs` (presence sensors, Switchboard's own left out), `_wifiDev` (a device with `SSID` and
+  `dataConnection`, e.g. OwnTracks), `_ssid1`…`_ssid4` (home network names; separate boxes because names can
+  contain commas), `_departMin` (default 2), `_staleHrs` (default 12, 0 = never), `_staleNotify` (notification devices).
+- **Rule:** any fresh source present, or the Wi-Fi device on a home SSID (and dataConnection not "Mobile") →
+  present at once, a pending departure is cancelled. Wi-Fi is only ever a positive signal. Every fresh source away
+  and not on home Wi-Fi → departure after `departMin` (`state.pplDepart` id → due ms, one `pplTimer` scheduled for
+  the earliest). A source with no activity (`getLastActivity()`) for `staleHrs` is left out; nothing fresh → keep
+  the current presence. Every 15 min `pplStaleCheck` recomputes everyone and pushes "X for Kelly hasn't reported in
+  12 h" once per quiet spell.
+- arrived() / departed() set it by hand (`state.pplOverride`) until a real source changes.
+- Startup (`initPeople` in initialize, also after Save): subscribe to the sources' presence and the Wi-Fi device's
+  SSID / dataConnection / presence, recompute, events only on a change; pending departures survive a reboot.
+- Every change is logged (kind "presence", "Albert arrived" / "Albert left", note = reason).
+- **Anyone Home:** `pplAnyoneOn` creates "Presence – Anyone Home - SB" (DNI `SB-<appId>-anyhome`, same driver,
+  `state.anyMade`; deleted later = missing, Recreate). Present while any person is; its arrived() / departed() are ignored.
+- Settings' `homeSensors` should be the People devices so notification "When" rules agree.
 
 ### Message log
 Last 100 entries in `state.log` (time, device, kind speak/sound/push/siren, text, outcome: played / queued / skipped

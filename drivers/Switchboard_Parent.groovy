@@ -2,7 +2,7 @@
  *  Switchboard Parent
  *
  *  The one "Switchboard" device the Switchboard app creates. Every other Switchboard
- *  device (Announce, Notify, Siren, the Guest Mode and Stop All switches) is its child,
+ *  device (Announce, Notify, Siren, Presence, the Mode and Stop All switches) is its child,
  *  so they sit together under one entry in the device list. This driver only passes
  *  requests from its children up to the app, and does the app's child-device work
  *  (create, delete, relabel, update attributes).
@@ -18,13 +18,14 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.2 - 2026-10-29 - Passes on Switchboard Presence arrived() / departed().
  *  0.1.1 - 2026-10-26 - Passes on when a child (or this device) is deleted, so the app can show it as missing.
  *  0.1.0 - 2026-10-26 - Initial build.
  */
 
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.1.1"
+@Field static final String DRIVER_VERSION = "0.1.2"
 @Field static final String NS = "almulder"
 
 metadata {
@@ -63,6 +64,7 @@ def sbVolume(String dni, Integer v)   { toApp("sbVolume") { it.sbVolume(dni, v) 
 def sbNotify(String dni, String text) { toApp("sbNotify") { it.sbNotify(dni, text) } }
 def sbSiren(String dni, String mode)  { toApp("sbSiren")  { it.sbSiren(dni, mode) } }
 def sbSwitch(String dni, String v)    { toApp("sbSwitch") { it.sbSwitch(dni, v) } }
+def sbPresence(String dni, String v)  { toApp("sbPresence") { it.sbPresence(dni, v) } }
 def sbChildRemoved(String dni)        { toApp("sbChildRemoved") { it.sbChildRemoved(dni) } }
 
 private void toApp(String what, Closure c) {
