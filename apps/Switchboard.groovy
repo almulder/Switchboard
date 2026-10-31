@@ -18,6 +18,9 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.5 - 2026-10-31 - "Add new …" always opens a blank item. It used to reopen the item just saved (for 20 s) or an unsaved
+ *                       one (for 2 min). Each Add link now carries its own stamp, so redraws keep the item and a new click
+ *                       starts fresh, on every setup list.
  *  1.0.4 - 2026-10-31 - testMode on the parent device fills itself in: opening the app (or Save Preferences on the device)
  *                       sets it, so it shows right after an update without pressing Done. Needs Switchboard Parent 0.1.4.
  *  1.0.3 - 2026-10-31 - Test Mode shows on the "Switchboard" parent device as testMode (on / off), so pistons can check it.
@@ -75,7 +78,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.4"
+@Field static final String APP_VERSION = "1.0.5"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -409,7 +412,7 @@ private void discardDraft(String kind, String id) {
     state[EDITS[kind].stateKey as String] = m
     removeItemSettings(kind, id)
 }
-/** deletes every unsaved draft (and its settings) except the one being edited; every page but that edit page calls it */
+/** deletes every unsaved draft (and its settings) except the one being edited; initialize() calls it (the next Add of a kind also drops that kind's drafts) */
 private void cleanDrafts(String keepKind = null, String keepId = null) {
     EDITS.keySet().each { String kind ->
         Map m = rawMap(kind)
@@ -421,31 +424,27 @@ private void cleanDrafts(String keepKind = null, String keepId = null) {
 }
 
 /**
- * The item an edit page shows. Opened by href with params [id: <id>] or [id: "new"]; Hubitat drops params on
- * submitOnChange redraws, so the id is kept in state.editId_<kind>. Returns null when the item is gone.
+ * The item an edit page shows. Opened by href with params [id: <id>] or [id: "new", n: <nonce>]. Every redraw of
+ * the page (buttons, submitOnChange) sends the same params back (paramsForPage), so the id is kept in
+ * state.editId_<kind>. Returns null when the item is gone.
  */
 private String editTarget(String kind, params) {
     String key = "editId_${kind}".toString()
     String pid = params?.id ? params.id.toString() : null
     if (pid == "new") {
-        // Hubitat re-renders pages (and rebuilds links) during redraws, so "new" can arrive many times for one Add:
-        // show the item just saved (if any, for 20 s), else keep filling the open draft, else start a fresh one.
-        Map sv = state["savedNew_${kind}".toString()] as Map
-        Map dr = rawMap(kind).find { k, v -> v instanceof Map && v.draft == true }?.with { [id: it.key, v: it.value] }
-        String cur
-        Long del = state["deleted_${kind}".toString()] as Long
-        if (del && now() - del < 20000L) cur = null                                       // just deleted: show "Deleted"
-        else if (sv && now() - ((sv.at ?: 0) as Long) < 20000L && rawMap(kind).containsKey(sv.id)) cur = sv.id as String
-        else if (dr && now() - (((dr.v as Map).touched ?: 0) as Long) < 120000L) cur = dr.id as String
-        else {
-            if (dr) discardDraft(kind, dr.id as String)
-            cur = newDraft(kind)
-            state.remove("confirmDel"); state.remove("editSaved"); state.remove("editErr")
+        // same nonce = a redraw of the same Add: keep its item (the draft, the item just saved, or gone after Delete).
+        // A new nonce = "Add new" clicked again: always a fresh draft; an unsaved draft left from before is dropped.
+        String nonce = (params?.n ?: "").toString(), nkey = "editNonce_${kind}".toString()
+        if ((state[nkey] as String) != nonce) {
+            rawMap(kind).findAll { k, v -> v instanceof Map && v.draft == true }.keySet().collect { it as String }.each { discardDraft(kind, it) }
+            state[key] = newDraft(kind)
+            state[nkey] = nonce
+            state.remove("confirmDel"); state.remove("editSaved"); state.remove("editErr"); state.remove("editMsg")
         }
-        state[key] = cur
     } else if (pid) {
         if ((state[key] as String) != pid) { state.remove("confirmDel"); state.remove("editSaved"); state.remove("editErr") }
         state[key] = pid
+        state.remove("editNonce_${kind}".toString())     // a stale Add link (same nonce) must not reopen this item
     }
     String id = state[key] as String
     state.editKind = kind
@@ -512,7 +511,7 @@ private void editRow(String kind, String id, String title, String desc) {
 private void addRow(String kind) {
     Map e = EDITS[kind]
     section {
-        href name: "hrefAdd_${kind}", page: e.edit as String, params: [id: "new"],
+        href name: "hrefAdd_${kind}", page: e.edit as String, params: [id: "new", n: now().toString()],
              title: "Add new ${e.what}", description: "Opens a new ${e.what}. It is created when you press Save."
     }
 }
@@ -533,7 +532,6 @@ private void saveItem(String kind, String id) {
         state[e.stateKey as String] = m
         if (KINDS[kind]) { ensureDevice(kind, id, n); if (kind == "ppl") initPeople() }
         else if (kind == "gm") { ensureGuestSwitch(id); initGuests() }      // subscribes hub modes too, no Done needed
-        state["savedNew_${kind}".toString()] = [id: id, at: now()]
         logInfo "Added ${e.what} '${n}'"
     } else {
         if (KINDS[kind]) { syncNames(); if (kind == "ppl") initPeople() }
@@ -1337,7 +1335,6 @@ void appButtonHandler(String btn) {
                 else deleteItem(kind, id)
                 if (!rawMap(kind).containsKey(id)) state.editMsg = "Deleted."
             }
-            if (!rawMap(kind).containsKey(id)) state["deleted_${kind}".toString()] = now()    // a redraw now shows "Deleted", not a new draft
             refreshMissing()    // it may have been the missing one
         }
         return

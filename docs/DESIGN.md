@@ -113,15 +113,19 @@ hint, then one `href` row per item (title = name plus status pills such as "no s
 always", "1 siren · stop after 5 min", "chime.mp3 · 5 s", "ON until … · own switch"), then an **Add new …** href.
 No hideable sections and no name field on the list page.
 Each item opens its own **edit page** (`profileEditPage`, `notifyEditPage`, `sirenEditPage`, `soundEditPage`,
-`guestEditPage`) via `href … params: [id: <id>]`; Add opens it with `params: [id: "new", n: <nonce>]`. Hubitat drops
-params on submitOnChange redraws, so the id is kept in `state.editId_<kind>` (the nonce stops a redraw that resends
-"new" from making a second draft). The edit page shows all of the item's inputs (Name first) in normal sections,
+`guestEditPage`) via `href … params: [id: <id>]`; Add opens it with `params: [id: "new", n: <nonce>]` (`now()`,
+new on every list render). Every redraw of a page (buttons, submitOnChange) resends the params it was opened with
+(`paramsForPage`), so the id is kept in `state.editId_<kind>` and the nonce in `state.editNonce_<kind>`: the same
+nonce keeps the same item (the draft, the item just saved, or "Deleted"); a new nonce (Add clicked again) always
+starts a fresh draft and drops any unsaved one of that kind (1.0.5; before, a 20 s / 2 min window reopened the last
+item). The edit page shows all of the item's inputs (Name first) in normal sections,
 test buttons and "Used by", then **Save** and a two-step **Delete** ("Yes, delete" / "Cancel", `state.confirmDel`).
 **New items are drafts:** "new" allocates the next real id and stores it with `draft: true`. Drafts have no device
 or switch and are left out of every runtime path (`ids()`, `soundIds()`, `guestIds()`, routing, Guest Mode checks,
 counts, "Used by"). Save on a draft needs a name (sounds also a URL), clears `draft`, and creates the device / switch.
-Every page except that kind's edit page (and `initialize()`) calls `cleanDrafts()`, which deletes unsaved drafts and
-removes all their `<kind>_<id>_` settings. Delete on a draft just discards it.
+`initialize()` calls `cleanDrafts()`, which deletes unsaved drafts and removes all their `<kind>_<id>_` settings;
+the next Add of a kind drops that kind's unsaved drafts the same way. Opening an existing item clears that kind's
+nonce, so a stale Add link can't reopen it. Delete on a draft just discards it.
 **Existing items:** inputs are stored as they change; Save relabels the device ("Changes are saved as you make
 them."). Buttons can't navigate, so after Save the page shows "✓ Saved" and a "Back to <list>" link. Delete works as
 before (device first; the item stays if the hub refuses, with the error shown).
