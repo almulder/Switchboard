@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.4 - 2026-10-31 - testMode on the parent device fills itself in: opening the app (or Save Preferences on the device)
+ *                       sets it, so it shows right after an update without pressing Done. Needs Switchboard Parent 0.1.4.
  *  1.0.3 - 2026-10-31 - Test Mode shows on the "Switchboard" parent device as testMode (on / off), so pistons can check it.
  *                       Read-only: still only the app turns Test Mode on or off. Needs Switchboard Parent 0.1.3.
  *  1.0.2 - 2026-10-30 - Message log legend: the example of another app's name no longer mentions an old project.
@@ -73,7 +75,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.3"
+@Field static final String APP_VERSION = "1.0.4"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -278,6 +280,7 @@ private void deleteControls(String kind, String id, String what) {
 def mainPage(params = null) {
     state.remove("confirmDel")
     syncNames()
+    syncTestModeAttr()          // fills in testMode on the parent device after an update, without needing Done
     dynamicPage(name: "mainPage", title: "", install: true, uninstall: true) {
         section {
             paragraph uiCss() + uiHeader(APP_TITLE, "v${APP_VERSION} · announcements, notifications and sirens", modePills())
@@ -2712,6 +2715,8 @@ private void turnTestModeOff(String why) {
     }
     syncTestModeAttr()
 }
+/** the parent device asks for Test Mode's state (its installed / Save Preferences) */
+String sbTestModeNow() { atomicState.tmOn == true ? "on" : "off" }
 /** shows Test Mode on the parent device (testMode on / off) for pistons to read; no event when it already matches */
 private void syncTestModeAttr() {
     String v = atomicState.tmOn == true ? "on" : "off"

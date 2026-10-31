@@ -19,6 +19,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.4 - 2026-10-31 - Save Preferences (and install) asks the app for Test Mode, so testMode always has a value.
  *  0.1.3 - 2026-10-31 - testMode attribute (on / off) so pistons can check Test Mode. Read-only: only the app sets it.
  *  0.1.2 - 2026-10-29 - Passes on Switchboard Presence arrived() / departed().
  *  0.1.1 - 2026-10-26 - Passes on when a child (or this device) is deleted, so the app can show it as missing.
@@ -27,7 +28,7 @@
 
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.1.3"
+@Field static final String DRIVER_VERSION = "0.1.4"
 @Field static final String NS = "almulder"
 
 metadata {
@@ -42,6 +43,7 @@ metadata {
 
 def installed() {
     log.info "${device.displayName}: installed (Switchboard Parent ${DRIVER_VERSION})"
+    askTestMode()
 }
 
 def uninstalled() {
@@ -52,6 +54,12 @@ def updated() {
     log.info "${device.displayName}: preferences saved (Switchboard Parent ${DRIVER_VERSION})"
     unschedule("logsOff")
     if (logEnable) runIn(1800, "logsOff")
+    askTestMode()
+}
+
+/** testMode comes from the app (never set here on its own), so it has a value even before Test Mode first changes */
+private void askTestMode() {
+    try { def v = parent?.sbTestModeNow(); if (v) sbSetTestMode(v as String) } catch (e) { log.warn "${device.displayName}: couldn't read Test Mode from the app: ${e}" }
 }
 
 def logsOff() {
