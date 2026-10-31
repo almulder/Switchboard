@@ -18,6 +18,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.2 - 2026-10-30 - Message log legend: the example of another app's name no longer mentions an old project.
  *  1.0.1 - 2026-10-29 - People: home network names and timings are stored as you type them, so Save uses them at once.
  *  1.0.0 - 2026-10-29 - People: one combined "Presence – <name> - SB" device per person (any source present or on home Wi-Fi =
  *                       home at once; away only when every fresh source agrees for the depart delay; stale sources
@@ -62,7 +63,7 @@
  *  0.1.3 - 2026-10-26 - Message log shows which rules system sent each message (WC, RM, BR, HSM…), with a legend.
  *  0.1.2 - 2026-10-26 - Switchboard's own devices are never used as real speakers, phones or sirens (would loop).
  *  0.1.1 - 2026-10-26 - Name, URL, tester and end-time fields save as you leave them (buttons couldn't see unsaved text).
- *  0.1.0 - 2026-10-26 - First build from Rule Forge 0.5.0's speech engine.
+ *  0.1.0 - 2026-10-26 - First build.
  */
 
 import groovy.transform.Field
@@ -70,7 +71,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.1"
+@Field static final String APP_VERSION = "1.0.2"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -1157,7 +1158,7 @@ private Long logPoint(String d, String tm, boolean end) {
 /** legend for the codes in the log's "From" column */
 private String fromLegend() {
     note("<b>From:</b> " + RULE_SYSTEMS.findAll { it[1] != "SB" }.collect { "${it[1]} = ${it[2]}" }.join(" · ") +
-         ". Any other app shows its own type, e.g. <i>Rule Forge – Office Door</i>.")
+         ". Any other app shows its own type, e.g. <i>Room Lighting – Office</i>.")
 }
 
 private String logTable(List rows) {

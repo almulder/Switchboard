@@ -18,7 +18,7 @@ Goals: simple to set up, no changes to how people write rules, nothing silently 
 | `drivers/Switchboard_Switch.groovy` | driver "Switchboard Switch" | Stop All and Guest Mode switches |
 | `drivers/Switchboard_Presence.groovy` | driver "Switchboard Presence" | People devices and Anyone Home (1.0.0) |
 
-The drivers start at **0.1.0**. Header, author and licence like Rule Forge (PolyForm Noncommercial 1.0.0).
+The drivers start at **0.1.0**. Every file has the same header, author and licence (PolyForm Noncommercial 1.0.0).
 
 ## 2. Virtual devices (children of one "Switchboard" parent device)
 
@@ -103,7 +103,7 @@ Capabilities: `Actuator`, `Alarm`, `Switch`. `siren()`, `strobe()`, `both()`, `o
 Main page (status first): Test Mode pill and button, queue status, last 10 log lines (modes that are on show as
 header pills; their on/off buttons are on each mode's page, not the main page since 0.8.2), then
 links: **Announcement Profiles**, **Notifications**, **Sirens**, **Sound files**, **Speakers & queue**,
-**Test Mode**, **Modes**, **Message log**, **Settings**. Reuse Rule Forge's UI kit (`uiCss`, `uiHeader`, ⓘ tips
+**Test Mode**, **Modes**, **Message log**, **Settings**. One UI kit for every page (`uiCss`, `uiHeader`, ⓘ tips
 via fixed-position CSS tooltip, pills). Plain short wording, detail in tips.
 
 ### Setup lists and edit pages (Announcement Profiles, Notifications, Sirens, Sound files, Guest Modes)
@@ -195,7 +195,6 @@ Tip: Hubitat File Manager files are `http://<hub-ip>/local/<file>.mp3`.
 ### Speakers & queue
 Per real speaker: method (auto / echo / setThenSpeak / speakVol / playTextRestore / speakOnly), extra wait, delay
 between setVolume and speak, restore volume. Queue mode global / overlap, duration measure / estimate, gap, max queue.
-(Copy from Rule Forge.)
 
 ### Test Mode (replaces "Monthly Test")
 **Only the app can turn Test Mode on or off. There is no Test Mode switch device** (no `tmSource`, `tmLabel`,
@@ -298,7 +297,7 @@ modes, endDate, endTime, defaultHours, remindTime, remindDevs, notifyOnOff.
 
 ## 4. Behaviour
 
-**Speech queue:** reuse Rule Forge's engine (ConcurrentLinkedQueue per app, semaphore, measured TTS duration, urgent
+**Speech queue:** one engine (ConcurrentLinkedQueue per app, semaphore, measured TTS duration, urgent
 queue interrupts normal but never another urgent, stale drop, per-speaker methods, volume restore, Sonos
 `playHighPriorityTTS` for urgent). Each item: [dni, profile, text|uri|sound, kind, callerVolume, queuedAt, source].
 Order per profile item: chime → sound/track → text; busy time = sound secs or measured text length + lead, plus the
@@ -410,5 +409,4 @@ handler, `sirenVerifyCheck` (`runInMillis`, overwritten each time, scheduled for
 are already sounding keep sounding until their "Stop after" time (a possibly real alarm is not silenced).
 
 ## 5. Not in v0.1
-Device Groups, Shared Values, rule types, templates (all from Rule Forge) — dropped. Per-person routing beyond
-separate profiles/notifiers. HPM manifest (before public release).
+Per-person routing beyond separate profiles/notifiers. HPM manifest (before public release).
