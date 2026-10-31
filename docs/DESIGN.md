@@ -199,6 +199,9 @@ between setVolume and speak, restore volume. Queue mode global / overlap, durati
 ### Test Mode (replaces "Monthly Test")
 **Only the app can turn Test Mode on or off. There is no Test Mode switch device** (no `tmSource`, `tmLabel`,
 `tmOutside`; nothing outside the app can start it). State lives in `state.tmOn` / `state.tmOffAt`.
+**Pistons can read it (1.0.3):** the "Switchboard" parent device has a read-only `testMode` attribute (`on` / `off`),
+set by `syncTestModeAttr()` whenever Test Mode turns on or off and on every `initialize`. It has no command, so
+nothing outside the app can change it, and the app never reads it (its own state decides).
 Testers `tmDevices` (`capability.notification`, multiple); `tmAutoOff` "Turn off after" — enum 15 / 30 / 60 / 120 /
 180 / 240 minutes, default 60, **never more than 4 hours** (clamp any value to 240); `tmRemind` minutes.
 **A hub reboot turns Test Mode off** (`systemStart` → off, push "Test Mode turned off: hub restarted"). After it

@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.3 - 2026-10-31 - Test Mode shows on the "Switchboard" parent device as testMode (on / off), so pistons can check it.
+ *                       Read-only: still only the app turns Test Mode on or off. Needs Switchboard Parent 0.1.3.
  *  1.0.2 - 2026-10-30 - Message log legend: the example of another app's name no longer mentions an old project.
  *  1.0.1 - 2026-10-29 - People: home network names and timings are stored as you type them, so Save uses them at once.
  *  1.0.0 - 2026-10-29 - People: one combined "Presence – <name> - SB" device per person (any source present or on home Wi-Fi =
@@ -71,7 +73,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.2"
+@Field static final String APP_VERSION = "1.0.3"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -966,7 +968,8 @@ def testPage(params = null) {
             }
         }
         section(uiTitle(null, "Test Mode settings")) {
-            paragraph note("Only this page can turn Test Mode on. There is no switch for it, so dashboards, rules and voice can't start it.") +
+            paragraph note("Only this page can turn Test Mode on. There is no switch for it, so dashboards, rules and voice can't start it. " +
+                           "Rules can read it: the \"${HUB_LABEL}\" device's <b>testMode</b> attribute is on or off.") +
                       tip("It turns off by itself after the time below, when you press Turn off, or when the hub restarts. Each time it ends, you have to tick the box again to turn it back on.")
             input "tmDevices", "capability.notification", title: "Testers" + tip("Who gets every alert while Test Mode is on, and the Test Mode reminders."),
                   multiple: true, required: false, submitOnChange: true
@@ -1396,6 +1399,7 @@ private def ensureHub() {
     if (h) return h
     try {
         h = addChildDevice(NS, PARENT_DRIVER, hubDni(), [name: HUB_LABEL, label: HUB_LABEL, isComponent: false])
+        if (h) syncTestModeAttr()       // a new parent device made from a page (re-create missing) has no testMode yet
     } catch (e) {
         log.error "${APP_TITLE}: couldn't create the '${HUB_LABEL}' parent device: ${e}"
         state.pageErr = "Couldn't create the device \"${HUB_LABEL}\". Is the \"${PARENT_DRIVER}\" driver installed in Drivers Code? (${e.message})"
@@ -2693,6 +2697,7 @@ private void turnTestModeOn() {
     queueToTesters()          // waiting announcements go to the testers, never dropped
     clearQueue()
     addLog([id: newLogId(), t: now(), dev: "Test Mode", dni: "", kind: "mode", text: "Test Mode on", outcome: "on", source: ""])
+    syncTestModeAttr()
 }
 /** ends Test Mode (button, timer or hub restart); the acknowledgement must be ticked again next time */
 private void turnTestModeOff(String why) {
@@ -2705,6 +2710,14 @@ private void turnTestModeOff(String why) {
         testNotice(why)
         addLog([id: newLogId(), t: now(), dev: "Test Mode", dni: "", kind: "mode", text: "Test Mode off", outcome: "off", source: ""])
     }
+    syncTestModeAttr()
+}
+/** shows Test Mode on the parent device (testMode on / off) for pistons to read; no event when it already matches */
+private void syncTestModeAttr() {
+    String v = atomicState.tmOn == true ? "on" : "off"
+    def h = hubDev()
+    if (!h || h.currentValue("testMode") == v) return
+    try { h.sbSetTestMode(v) } catch (e) { logDebug "testMode on the parent device: ${e}" }
 }
 
 /** Test Mode routing: the alert is pushed to the testers; the same text within 2 s is sent once. */
@@ -3605,6 +3618,7 @@ void initialize() {
             if (r > 0) runIn(r * 60, "testModeReminder")
         }
     }
+    syncTestModeAttr()          // a new parent device, or one that missed an update
 
     // ---- Guest Modes
     initGuests()

@@ -5,7 +5,8 @@
  *  device (Announce, Notify, Siren, Presence, the Mode and Stop All switches) is its child,
  *  so they sit together under one entry in the device list. This driver only passes
  *  requests from its children up to the app, and does the app's child-device work
- *  (create, delete, relabel, update attributes).
+ *  (create, delete, relabel, update attributes). Its testMode attribute shows whether
+ *  Test Mode is on; nothing outside the app can change it.
  *
  *  Requires Hubitat platform 2.5.0 or newer.
  *
@@ -18,6 +19,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.3 - 2026-10-31 - testMode attribute (on / off) so pistons can check Test Mode. Read-only: only the app sets it.
  *  0.1.2 - 2026-10-29 - Passes on Switchboard Presence arrived() / departed().
  *  0.1.1 - 2026-10-26 - Passes on when a child (or this device) is deleted, so the app can show it as missing.
  *  0.1.0 - 2026-10-26 - Initial build.
@@ -25,12 +27,13 @@
 
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.1.2"
+@Field static final String DRIVER_VERSION = "0.1.3"
 @Field static final String NS = "almulder"
 
 metadata {
     definition(name: "Switchboard Parent", namespace: "almulder", author: "Albert Mulder") {
         capability "Actuator"
+        attribute "testMode", "enum", ["on", "off"]     // no command: only the app's Test Mode page changes it
     }
     preferences {
         input name: "logEnable", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
@@ -101,4 +104,9 @@ def sbRelabel(String dni, String label) {
 
 def sbEvent(String dni, String name, value) {
     getChildDevice(dni)?.sendEvent(name: name, value: value)
+}
+
+/** the app reports Test Mode on / off (this device's own attribute) */
+def sbSetTestMode(String v) {
+    if (v in ["on", "off"]) sendEvent(name: "testMode", value: v, descriptionText: "${device.displayName}: Test Mode is ${v}")
 }
