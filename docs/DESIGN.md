@@ -317,6 +317,15 @@ Track playback: `playTrackAndRestore(url, vol)` if supported, else set volume + 
 setVolume + `playTrack` path. Found on a Sonos S1 Connect:Amp (Hubitat's Sonos Player 2 driver): after
 `playTrackAndRestore`, the next `speak` came out 1–2 minutes late; after plain `playTrack` it came out on time.
 S2 speakers were fine either way. Cost: music playing on that speaker stops instead of resuming.
+**Speak without restore (1.0.6, per speaker, `spkWordsPlain_<id>`, only when the driver has `playTrack`):** words
+are played as the hub's speech file (`textToSpeech(text).uri`, made once per message and also used for its length),
+via `rememberVolume` + `setVolume(vol)` + pause + `playTrack(uri)` (no volume from the rule: `playTrack` at the
+current volume). Switchboard restores the volume once the message's wait is over. Takes precedence over the speak
+method, urgent `playHighPriorityTTS` and noResume's `playText`; if text-to-speech fails, the normal method is used.
+Found on the Master Bedroom Sonos (Hubitat's Sonos Player 1 driver): `speak(text, vol)` and `playText` both restore
+the speaker's earlier state timed from the command, but the clip starts 1–1.7 s later, so the second of two quick
+messages was cut after about 1 s. That driver's preference "TTS Volume boost" (+10% by default) also raises `playText`
+and `speak` without a volume, which plain `playTrack` avoids. Cost: music on that speaker stops instead of resuming.
 **Sound length and volume (0.7.5):** a sound's length is a decimal (min 0.5 s). trackLengthCheck ignores a reported
 length within 1 s of the assumed one (speakers report whole seconds). Each profile has `sndVolMode` (same / daynight /
 fixed, with `sndDayVol`, `sndNightVol`, `sndFixedVol`) for its chime and sound/track parts; the words keep the

@@ -18,6 +18,9 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.6 - 2026-11-01 - Speakers & queue: "Speak without restore" per speaker. Words play as the hub's speech file with plain
+ *                       playTrack (Switchboard sets and restores the volume), for Sonos speakers whose own speak restores
+ *                       early and cuts messages off.
  *  1.0.5 - 2026-10-31 - "Add new …" always opens a blank item. It used to reopen the item just saved (for 20 s) or an unsaved
  *                       one (for 2 min). Each Add link now carries its own stamp, so redraws keep the item and a new click
  *                       starts fresh, on every setup list.
@@ -78,7 +81,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.5"
+@Field static final String APP_VERSION = "1.0.6"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -928,6 +931,9 @@ def speakersPage(params = null) {
                 input "spkRestore_${id}", "bool", title: "Restore previous volume afterwards", defaultValue: true, width: 4
                 if (dev.hasCommand("playTrackAndRestore") && dev.hasCommand("playTrack"))
                     input "spkPlain_${id}", "bool", title: "Play sounds without restore" + tip("Turn on if a message after a chime or sound is late by a minute or more (seen on Sonos S1). Sounds then use plain playTrack: music playing on this speaker stops instead of resuming."),
+                          defaultValue: false, width: 8
+                if (dev.hasCommand("playTrack"))
+                    input "spkWordsPlain_${id}", "bool", title: "Speak without restore" + tip("Turn on if this speaker cuts messages off after a few words (seen on Sonos: its own speak restores too early). Words then play as a plain track at the profile's volume, and Switchboard restores the volume after. Music playing on this speaker stops instead of resuming."),
                           defaultValue: false, width: 8
                 input "btnTest_${id}", "button", title: "Test this speaker"
             }
@@ -3429,12 +3435,23 @@ private Integer parseTrackSecs(String v) {
 private long speakText(Map item, String text, List devs, Integer vol, boolean urgent) {
     List later = []                 // speakers that need setVolume first
     Set plainText = [] as Set       // of those, the ones that get playText (no resume)
+    Set plainTrack = [] as Set      // of those, the ones that get the speech file as a plain track ("Speak without restore")
+    Map tts = null                  // the speech file, made once for those speakers
+    boolean ttsTried = false        // asked once: a failed text-to-speech isn't retried for each speaker
     int ok = 0
     boolean noRes = noResume(item)
     devs.each { dev ->
         String m = methodFor(dev, vol)
         try {
-            if (noRes && vol != null && dev.hasCommand("playText") && dev.hasCommand("setVolume")) {
+            boolean wordsPlain = settings["spkWordsPlain_${dev.id}"] == true && dev.hasCommand("playTrack")
+            if (wordsPlain && !ttsTried) { ttsTried = true; tts = speechFile(text) }
+            if (wordsPlain && tts?.uri) {
+                if (vol != null && dev.hasCommand("setVolume")) {
+                    rememberVolume(dev)
+                    dev.setVolume(vol)
+                    later << dev; plainTrack << dev.id.toString()
+                } else { dev.playTrack(tts.uri as String); ok++ }
+            } else if (noRes && vol != null && dev.hasCommand("playText") && dev.hasCommand("setVolume")) {
                 rememberVolume(dev)
                 dev.setVolume(vol)
                 later << dev; plainText << dev.id.toString()
@@ -3452,7 +3469,8 @@ private long speakText(Map item, String text, List devs, Integer vol, boolean ur
         if (d > 0) pauseExecution(Math.min(d, 3000))
         later.each { dev ->
             try {
-                if (plainText.contains(dev.id.toString())) dev.playText(text) else dev.speak(text)
+                if (plainTrack.contains(dev.id.toString())) dev.playTrack(tts.uri as String)
+                else if (plainText.contains(dev.id.toString())) dev.playText(text) else dev.speak(text)
                 ok++
             } catch (e) { log.error "${APP_TITLE}: speak failed on ${dev.displayName}: ${e}" }
         }
@@ -3461,7 +3479,7 @@ private long speakText(Map item, String text, List devs, Integer vol, boolean ur
     item.played = true
     long sentAt = now()
     if (item.queuedAt) logDebug "Sent to speaker(s) ${sentAt - (item.queuedAt as Long)} ms after it was queued"
-    BigDecimal secs = messageSeconds(text)
+    BigDecimal secs = messageSeconds(text, tts, ttsTried)
     BigDecimal lead = devs.collect { (settings["spkLead_${it.id}"] ?: 0) as BigDecimal }.max() ?: 0
     BigDecimal wait = secs + lead + ((gapSec != null ? gapSec : 2) as BigDecimal)
     logInfo "${urgent ? 'URGENT ' : ''}Speaking (${wait}s) on ${devs*.displayName.join(', ')} @${vol != null ? vol : '-'}: ${text}" +
@@ -3546,14 +3564,18 @@ private void restoreAll() {
     }
 }
 
-private BigDecimal messageSeconds(String text) {
-    if ((durMode ?: "measure") == "measure") {
-        try {
-            Map tts = textToSpeech(text)
-            if (tts?.duration != null) return (tts.duration as BigDecimal) + 1     // whole seconds; round up
-        } catch (e) { logDebug "textToSpeech failed, estimating: ${e}" }
+private BigDecimal messageSeconds(String text, Map made = null, boolean tried = false) {
+    // a speech file already made for this message is what plays: use its length even in estimate mode
+    if (made?.duration != null) return (made.duration as BigDecimal) + 1      // whole seconds; round up
+    if ((durMode ?: "measure") == "measure" && !tried) {
+        Map tts = speechFile(text)
+        if (tts?.duration != null) return (tts.duration as BigDecimal) + 1     // whole seconds; round up
     }
     return new BigDecimal(Math.ceil(text.length() / 12.0)) + 2
+}
+/** the hub's speech file for the text: [uri, duration], or null if text-to-speech failed */
+private Map speechFile(String text) {
+    try { return textToSpeech(text) as Map } catch (e) { logDebug "textToSpeech failed: ${e}"; return null }
 }
 
 // ---- night window (global, Settings)
