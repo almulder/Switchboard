@@ -258,21 +258,40 @@ pistons forced them into sync with arrived() / departed(), so a glitch could mar
 Switchboard reads the sources and never writes to them.
 - Kind `ppl` (ids `u1`…, `state.people`), device "Presence – <name> - SB" (driver **Switchboard Presence**:
   PresenceSensor, commands arrived() / departed(), attributes reason, lastArrived, lastDeparted, onHomeWifi,
-  sources). List page `peoplePage`, edit page `personEditPage`.
+  sources, suspectSources (0.1.1: names of stuck sources, or "none")). List page `peoplePage`, edit page `personEditPage`.
 - Inputs: `ppl_<id>_srcs` (presence sensors, Switchboard's own left out), `_wifiDev` (a device with `SSID` and
   `dataConnection`, e.g. OwnTracks), `_ssid1`…`_ssid4` (home network names; separate boxes because names can
-  contain commas), `_departMin` (default 2), `_staleHrs` (default 12, 0 = never), `_changeOnly`
-  (1.0.7: enum of source / Wi-Fi device ids that only report when they change, e.g. the phone app geofence; never
-  stale), `_staleNotify` (notification devices).
-- **Rule:** any fresh source present, or the Wi-Fi device on a home SSID (and dataConnection not "Mobile") →
-  present at once, a pending departure is cancelled. Wi-Fi is only ever a positive signal. Every fresh source away
-  and not on home Wi-Fi → departure after `departMin` (`state.pplDepart` id → due ms, one `pplTimer` scheduled for
-  the earliest). A source with no activity (`getLastActivity()`) for `staleHrs` is left out (unless it is in `_changeOnly`); nothing fresh → keep
-  the current presence. Every 15 min `pplStaleCheck` recomputes everyone and pushes "X for Kelly hasn't reported in
-  12 h" once per quiet spell (never for a `_changeOnly` device).
-- arrived() / departed() set it by hand (`state.pplOverride`) until a real source changes.
-- Startup (`initPeople` in initialize, also after Save): subscribe to the sources' presence and the Wi-Fi device's
-  SSID / dataConnection / presence, recompute, events only on a change; pending departures survive a reboot.
+  contain commas), `_departRule` (1.1.0: `all` default / `atleast`), `_departN` (default 2), `_departMin` (default 2),
+  `_minDist` (default 0 = off), `_staleHrs` (default 12, 0 = never), `_changeOnly` (ids of sources that only report
+  when they change, e.g. the phone app geofence), `_staleNotify` (notification devices).
+- **Freshness (1.1.0):** a source's last report = the newest event date of `presence` or `lastLocationtime` (Wi-Fi
+  device: `SSID`, `dataConnection`, `presence`, `lastLocationtime`). Never `getLastActivity()`: it also moves on
+  commands and notifications sent to the device, which kept a stuck phone looking fresh (Nov 1: Kelly's phone app
+  presence stuck on present since Oct 29 while OwnTracks notifications reached it daily; HSM never armed). No report
+  for `staleHrs` → left out, warned once per quiet spell. `_changeOnly` sources skip the hours check.
+- **Stuck (1.1.0, every source):** suspect when, since its own last presence change, another source of the same person
+  departed and then arrived with at least 10 min between (`state.pplTrips` device id → [dep, arr] from presence
+  events; `PPL_TRIP_MIN_MS`, so a GPS blip isn't a trip). The last completed trip is kept as [tDep, tArr, tPrev =
+  the arrival before it], so the source stays suspect when the other source leaves again. A source that says present
+  is suspect if it hasn't changed since before tDep; one that says away only if it hasn't changed since before tPrev
+  (a phone that left a bit before OwnTracks and arrives a bit after it is late, not stuck). A suspect source is left out of arriving and leaving, shown as
+  a "stuck: …" pill and in `suspectSources`, logged, and `_staleNotify` gets one notice when it becomes suspect
+  (`state.pplSuspect`). It clears on its next presence change. (The request's optional "disagrees for N minutes"
+  rule was left out: "at least N signals" covers that case with fewer moving parts.)
+- **Signals:** usable = fresh and not stuck. Each usable source is present, or away; with `_minDist` > 0 a source
+  reporting `distanceFromHome` below it gives no away vote (it doesn't count either way). The fresh Wi-Fi device is
+  one more signal: home SSID (and not Mobile) = home, Mobile data or another SSID = one away vote.
+- **Arrive:** home Wi-Fi, or a usable source that reported present after the person was marked away
+  (`state.pplLeftAt`), so a source stuck on present can't bring someone straight back.
+- **Leave:** while present and not on home Wi-Fi, when every usable source gives an away vote, or (`atleast`) at
+  least `_departN` away votes (sources + Wi-Fi). The condition must hold for `_departMin` (`state.pplDepart` id → due
+  ms, one `pplTimer` for the earliest); it is re-checked on every source / Wi-Fi event, so a short Wi-Fi drop or a
+  source that turns present during the delay cancels it. No usable source → keep the current presence.
+- **Reason** names the rule, e.g. "2 of 3 signals away (Owntracks away, Wi-Fi Mobile) for 2 min; Phone ignored (stuck)".
+- Every 15 min `pplStaleCheck` recomputes everyone and pushes "X for Kelly hasn't reported in 12 h" once per quiet spell.
+- arrived() / departed() set it by hand (`state.pplOverride`) until a real source's presence changes.
+- Startup (`initPeople` in initialize, also after Save): subscribe to the sources' presence / distanceFromHome and
+  the Wi-Fi device's SSID / dataConnection / presence, recompute, events only on a change; pending departures survive a reboot.
 - Every change is logged (kind "presence", "Albert arrived" / "Albert left", note = reason).
 - **Anyone Home:** `pplAnyoneOn` creates "Presence – Anyone Home - SB" (DNI `SB-<appId>-anyhome`, same driver,
   `state.anyMade`; deleted later = missing, Recreate). Present while any person is; its arrived() / departed() are ignored.

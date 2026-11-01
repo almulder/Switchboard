@@ -18,6 +18,12 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.1.0 - 2026-11-01 - People: a source's freshness comes from its presence / location reports only (notifications sent to a
+ *                       phone no longer count). Stuck check: a source that didn't change while another source of the person
+ *                       went away 10+ min and came back is left out until it changes (pill, suspectSources attribute, one
+ *                       notice). "Away when": every source, or at least N signals (sources away + Wi-Fi on Mobile / another
+ *                       network). Optional minimum distance for OwnTracks away votes. Arrivals need a source that turned
+ *                       present after the person left. Needs Switchboard Presence 0.1.1.
  *  1.0.7 - 2026-11-01 - People: "Sources that only report when they change" (e.g. the phone app's geofence). Those are never
  *                       treated as quiet, so they always count and send no "hasn't reported" warning.
  *  1.0.6 - 2026-11-01 - Speakers & queue: "Speak without restore" per speaker. Words play as the hub's speech file with plain
@@ -83,7 +89,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.7"
+@Field static final String APP_VERSION = "1.1.0"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -382,7 +388,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
     gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs", "notifyOnOff"],
-    ppl : ["name", "srcs", "wifiDev", "ssid1", "ssid2", "ssid3", "ssid4", "departMin", "staleHrs", "changeOnly", "staleNotify"]
+    ppl : ["name", "srcs", "wifiDev", "ssid1", "ssid2", "ssid3", "ssid4", "departRule", "departN", "departMin", "minDist", "staleHrs", "changeOnly", "staleNotify"]
 ]
 private void removeItemSettings(String kind, String id) {
     String pre = "${kind}_${id}_".toString()
@@ -1239,14 +1245,16 @@ def peoplePage(params = null) {
     dynamicPage(name: "peoplePage", title: "", install: false, uninstall: false, nextPage: "mainPage") {
         section {
             paragraph pageHead("People", "${APP_TITLE} · Setup")
-            paragraph uiHint("One presence device per person, <b>Presence – name - SB</b>. Home at once when any source says present or the phone is on home Wi-Fi; away only when every source agrees for the depart delay. Switchboard never changes the real sources.")
+            paragraph uiHint("One presence device per person, <b>Presence – name - SB</b>. Home at once on home Wi-Fi or when a source reports present; away when every source says away (or, if set, at least N signals) for the depart delay. A source that looks stuck is left out. Switchboard never changes the real sources.")
             if (state.pageErr) { paragraph warn(state.pageErr as String); state.remove("pageErr") }
             if (!ids("ppl")) paragraph uiHint("None yet.")
             ids("ppl").each { String id ->
                 String pr = pplPresence(id)
-                List stale = (pplStatus(id).stale ?: []) as List
+                Map pst = pplStatus(id)
+                List stale = (pst.stale ?: []) as List, stuck = ((pst.suspect ?: []) as List)*.name
                 editRow("ppl", id, esc(itemName("ppl", id)) + " " + uiPill(pr == "present" ? "home" : (pr ? "away" : "?"), pr == "present" ? "on" : "info") +
-                        (stale ? " " + uiPill("no report: ${stale.join(', ')}", "warn") : ""),
+                        (stale ? " " + uiPill("no report: ${stale.join(', ')}", "warn") : "") +
+                        (stuck ? " " + uiPill("stuck: ${stuck.join(', ')}", "warn") : ""),
                         (sbChild(itemDni("ppl", id))?.currentValue("reason") ?: "") as String)
             }
         }
@@ -1273,10 +1281,10 @@ def personEditPage(params = null) {
             input pre + "name", "text", title: "Name" + tip("The device is called 'Presence – name - SB'."), submitOnChange: true, width: 6
             input pre + "srcs", "capability.presenceSensor", title: "Sources" + tip("Every presence sensor for this person, e.g. the Hubitat phone app presence and OwnTracks. Any of them present = home."),
                   multiple: true, required: false, submitOnChange: true
-            if (!realDevs(settings[pre + "srcs"])) paragraph warn("Pick at least one source. Home Wi-Fi only ever says 'home', so it can't decide when someone leaves.")
+            if (!realDevs(settings[pre + "srcs"])) paragraph warn("Pick at least one source. Wi-Fi alone can't decide when someone leaves.")
         }
         section(uiTitle(null, "Home Wi-Fi")) {
-            input pre + "wifiDev", "capability.presenceSensor", title: "Device that reports the Wi-Fi network (SSID)" + tip("E.g. the OwnTracks device (attributes SSID and dataConnection). On a home network = home at once. Off it never counts as away."),
+            input pre + "wifiDev", "capability.presenceSensor", title: "Device that reports the Wi-Fi network (SSID)" + tip("E.g. the OwnTracks device (attributes SSID and dataConnection). On a home network = home at once. Mobile data or another network counts as one away signal only with the 'at least N signals' rule below."),
                   required: false, submitOnChange: true, width: 6
             if (settings[pre + "wifiDev"]) {
                 (1..4).each { n -> input pre + "ssid${n}", "text", title: "Home network name ${n}", required: false, submitOnChange: true, width: 3 }
@@ -1285,16 +1293,22 @@ def personEditPage(params = null) {
             }
         }
         section(uiTitle(null, "Leaving and silent sources")) {
-            input pre + "departMin", "decimal", title: "Away after every source says away for (minutes)", range: "0..120", defaultValue: 2, submitOnChange: true, width: 6
+            input pre + "departRule", "enum", title: "Away when" + tip("Every source: all sources still reporting say away. At least N signals: also away when N signals say away, counting each source that says away and the Wi-Fi device on Mobile data or another network (one signal), so one stuck phone can't keep someone home. Home Wi-Fi always means home."),
+                  options: [all: "Every source says away", atleast: "Every source, or at least N signals say away"], defaultValue: "all", submitOnChange: true, width: 6
+            if (settings[pre + "departRule"] == "atleast")
+                input pre + "departN", "number", title: "N (signals)", range: "1..5", defaultValue: 2, submitOnChange: true, width: 3
+            input pre + "departMin", "decimal", title: "For how long (minutes)" + tip("The away signals must hold this whole time. A source that turns present, or home Wi-Fi, cancels it."), range: "0..120", defaultValue: 2, submitOnChange: true, width: 3
+            input pre + "minDist", "decimal", title: "Away only counts beyond (distance, 0 = off)" + tip("For sources that report distanceFromHome (OwnTracks), in that device's unit (miles or km). Closer than this, its 'away' is not counted, so GPS drift at home can't make someone leave."),
+                  range: "0..50", defaultValue: 0, submitOnChange: true, width: 6
             input pre + "staleHrs", "number", title: "Ignore a source that hasn't reported in (hours), 0 = never" +
-                  tip("A source with no events for this long is left out of the decision, so a dead app can't keep someone home or block leaving. Sources picked below as 'only report when they change' are never left out."),
+                  tip("A source with no location or presence report for this long is left out of the decision, so a dead app can't keep someone home or block leaving. Notifications sent to a phone don't count as reports. Sources picked below as 'only report when they change' use the stuck check instead."),
                   range: "0..720", defaultValue: 12, submitOnChange: true, width: 6
             Map srcOpts = (realDevs(settings[pre + "srcs"]) + (pplWifiDev(id) ? [pplWifiDev(id)] : []))
                     .unique { it.id }.collectEntries { [(it.id.toString()): it.displayName as String] }
             if (srcOpts) input pre + "changeOnly", "enum", title: "Sources that only report when they change" +
-                  tip("E.g. the Hubitat phone app's geofence: it sends nothing while you stay put. These are never treated as quiet, so they always count and never warn. Leave OwnTracks out, so a dead OwnTracks is still caught."),
+                  tip("E.g. the Hubitat phone app's geofence: it sends nothing while you stay put, so the hours check above doesn't suit it. Instead it is marked stuck (and left out until it changes) when another source of this person goes away for 10 min or more and comes back while it doesn't change. Leave OwnTracks out, so a dead OwnTracks is still caught by the hours check."),
                   options: srcOpts, multiple: true, required: false, submitOnChange: true, width: 6
-            input pre + "staleNotify", "capability.notification", title: "Tell me when a source goes quiet (optional)", multiple: true, required: false
+            input pre + "staleNotify", "capability.notification", title: "Tell me when a source goes quiet or looks stuck (optional)", multiple: true, required: false
         }
         if (!draft) {
             section(uiTitle(null, "Right now")) {
@@ -1302,6 +1316,7 @@ def personEditPage(params = null) {
                 def c = sbChild(itemDni("ppl", id))
                 paragraph note("<b>${esc((c?.currentValue('presence') ?: '?') as String)}</b> · ${esc((c?.currentValue('reason') ?: '') as String)}<br>${esc(st.summary as String)}")
                 if (st.stale) paragraph warn("No report for over ${intSet(pre + 'staleHrs', 12)} h, left out: ${esc((st.stale as List).join(', '))}")
+                if (st.suspect) paragraph warn("Looks stuck (another source made a trip while it didn't change), left out until it changes: ${esc(((st.suspect as List)*.name).join(', '))}")
                 if ((state.pplOverride ?: [:])[id]) paragraph note("Set by hand with arrived() / departed(); the next change from a source takes over again.")
                 paragraph note("Used by: pistons, HSM and notifications that use <b>${esc(deviceLabel('ppl', id))}</b>.")
             }
@@ -2224,54 +2239,113 @@ private List<String> pplSsids(String id) {
 }
 /** "# Phone - Albert's" → "Phone" */
 private String pplShort(d) { (((d?.displayName ?: "") as String).replaceAll(/^#\s*/, "").split(/\s+-\s+/)[0] ?: "source").trim() }
-private boolean pplStale(d, long staleMs, List changeOnly = []) {
-    if (staleMs <= 0 || changeOnly.contains(d.id.toString())) return false     // reports only on change: never "quiet"
+/** attributes that mean "this source reported where the person is" (never commands or notifications sent to it) */
+@Field static final List<String> PPL_REPORT_ATTRS = ["presence", "lastLocationtime"]
+@Field static final List<String> PPL_WIFI_ATTRS = ["SSID", "dataConnection", "presence", "lastLocationtime"]
+/** another source's trip only proves a source stuck when the person was away at least this long (a GPS blip isn't a trip) */
+@Field static final long PPL_TRIP_MIN_MS = 10L * 60000L
+
+/** when the source last reported a location / presence (getLastActivity also counts notifications sent to a phone) */
+private Long pplLastReport(d, List<String> attrs) {
     Long last = null
-    try { last = d.getLastActivity()?.time as Long } catch (ignored) { }
-    return last != null && now() - last > staleMs
+    attrs.each { String a ->
+        try { Long t = d.currentState(a)?.date?.time as Long; if (t != null && (last == null || t > last)) last = t } catch (ignored) { }
+    }
+    return last
+}
+/** no report for staleHrs; sources picked as "only report when they change" are judged by the stuck rule instead */
+private boolean pplStale(d, long staleMs, List changeOnly, List<String> attrs) {
+    if (staleMs <= 0 || changeOnly.contains(d.id.toString())) return false
+    Long last = pplLastReport(d, attrs)
+    return last == null || now() - last > staleMs
+}
+/** when the source's presence last changed (its presence event), or null */
+private Long pplChangedAt(d) {
+    try { return d.currentState("presence")?.date?.time as Long } catch (ignored) { return null }
+}
+/**
+ * Stuck: since this source's presence last changed, another source of the same person completed a trip (away at least
+ * 10 min, then back; kept as tDep / tArr, so it still counts after that source leaves again). The person clearly moved,
+ * this source didn't notice. A source that says away is only stuck if it was already away before the arrival that came
+ * before that trip (tPrev), so a phone that simply left a bit earlier and arrives a bit later isn't flagged.
+ * Clears when it next reports a change.
+ */
+private boolean pplSuspect(d, List srcs) {
+    Long since = pplChangedAt(d)
+    if (since == null) return false
+    boolean present = d.currentValue("presence") == "present"
+    Map trips = (state.pplTrips ?: [:]) as Map
+    return srcs.any { o ->
+        if (o.id == d.id) return false
+        Map tr = trips[o.id.toString()] as Map
+        Long tDep = tr?.tDep as Long, tArr = tr?.tArr as Long, tPrev = tr?.tPrev as Long
+        if (tDep == null || tArr == null) return false
+        return present ? tDep > since : (tPrev != null && tPrev > since)
+    }
+}
+/** OwnTracks distanceFromHome (in that device's unit), or null */
+private BigDecimal pplDistance(d) {
+    try { def v = d.currentValue("distanceFromHome"); return v != null && v.toString().trim() ? (v.toString().trim() as BigDecimal) : null } catch (ignored) { return null }
 }
 
-/** [present, fresh (sources still reporting), wifiOk (Wi-Fi device still reporting), wifi (on home Wi-Fi), reason, summary, stale names] */
+/**
+ * One person's signals:
+ *  present (decides on its own: home Wi-Fi, or a usable source present), homeWifi, usable (fresh, not stuck) sources,
+ *  presentSrcs [[name, since]], awayVotes (names of valid away signals), allAway (every usable source a valid away vote),
+ *  reason, summary, stale names, suspect [[id, name, since]].
+ */
 private Map pplStatus(String id) {
     long staleMs = intSet("ppl_${id}_staleHrs", 12) * 3600000L
     List changeOnly = ((settings["ppl_${id}_changeOnly"] ?: []) as List).collect { it.toString() }
-    List parts = [], presentBy = [], stale = []
-    int fresh = 0
+    BigDecimal minDist = (settings["ppl_${id}_minDist"] ?: 0) as BigDecimal
+    List parts = [], presentSrcs = [], awayVotes = [], stale = [], suspect = [], ignored = []
+    int usable = 0, validAway = 0
     List srcs = realDevs(settings["ppl_${id}_srcs"])
     srcs.each { d ->
         String nm = pplShort(d)
-        if (pplStale(d, staleMs, changeOnly)) { stale << (d.displayName as String); parts << "${nm}: no report"; return }
-        fresh++
-        boolean p = d.currentValue("presence") == "present"
-        if (p) presentBy << nm
-        parts << "${nm}: ${p ? 'present' : 'away'}"
+        if (pplStale(d, staleMs, changeOnly, PPL_REPORT_ATTRS)) { stale << (d.displayName as String); parts << "${nm}: no report"; return }
+        if (pplSuspect(d, srcs)) {
+            suspect << [id: d.id.toString(), name: d.displayName as String, since: pplChangedAt(d)]
+            ignored << nm; parts << "${nm}: stuck (${d.currentValue('presence') ?: '?'})"; return
+        }
+        usable++
+        if (d.currentValue("presence") == "present") { presentSrcs << [name: nm, since: pplChangedAt(d)]; parts << "${nm}: present"; return }
+        BigDecimal dist = pplDistance(d)
+        if (minDist > 0 && dist != null && dist < minDist) { parts << "${nm}: away, ${dist} (under ${minDist}, not counted)"; return }
+        validAway++; awayVotes << "${nm} away".toString(); parts << "${nm}: away"
     }
-    boolean wifi = false, wifiOk = false
+    boolean homeWifi = false, wifiFresh = false
     def w = pplWifiDev(id)
-    String ssid = null
     if (w) {
-        wifiOk = !pplStale(w, staleMs, changeOnly)
-        if (wifiOk) {
-            ssid = (w.currentValue("SSID") ?: "") as String
+        if (!pplStale(w, staleMs, changeOnly, PPL_WIFI_ATTRS)) {
+            wifiFresh = true
+            String ssid = ((w.currentValue("SSID") ?: "") as String).trim()
             String dc = (w.currentValue("dataConnection") ?: "") as String
-            wifi = ssid && pplSsids(id).contains(ssid.trim().toLowerCase()) && !dc.toLowerCase().contains("mobile")
-            parts << "Wi-Fi: " + (wifi ? "home (${ssid})" : (dc ? dc : "off home"))
+            boolean mobile = dc.toLowerCase().contains("mobile")
+            homeWifi = ssid && pplSsids(id).contains(ssid.toLowerCase()) && !mobile
+            if (homeWifi) parts << "Wi-Fi: home (${ssid})"
+            else if (mobile || ssid) { awayVotes << (mobile ? "Wi-Fi Mobile" : "Wi-Fi ${ssid}").toString(); parts << "Wi-Fi: " + (mobile ? "Mobile" : "${ssid} (not home)") }
+            else parts << "Wi-Fi: " + (dc ?: "unknown")
         } else if (!srcs.any { it.id == w.id }) stale << (w.displayName as String)
     }
+    String ign = ignored ? "; ${ignored.join(' and ')} ignored (stuck)" : ""
     String reason
-    if (wifi) reason = "${pplShort(w)} on home Wi-Fi" + (presentBy ? ", ${presentBy.join(' and ')} present" : "")
-    else if (presentBy) reason = "${presentBy.join(' and ')} present"
-    else if (!fresh) reason = "No source has reported lately"
-    else reason = "All sources away"
-    return [present: wifi || presentBy as boolean, fresh: fresh, wifiOk: wifiOk, wifi: wifi, reason: reason,
-            summary: parts.join(", "), stale: stale]
+    if (homeWifi) reason = "${pplShort(w)} on home Wi-Fi" + (presentSrcs ? ", ${presentSrcs*.name.join(' and ')} present" : "") + ign
+    else if (presentSrcs) reason = "${presentSrcs*.name.join(' and ')} present" + ign
+    else if (!usable) reason = (suspect ? "Only stuck sources" : "No source has reported lately") + ign
+    else reason = (validAway == usable ? "All sources away" : "Sources away but near home (under ${minDist})") + ign
+    return [present: homeWifi || presentSrcs as boolean, homeWifi: homeWifi, usable: usable, presentSrcs: presentSrcs,
+            awayVotes: awayVotes, allAway: usable > 0 && validAway == usable, signals: usable + (wifiFresh ? 1 : 0),
+            reason: reason, ign: ign, summary: parts.join(", "), stale: stale, suspect: suspect]
 }
 
 /** subscriptions, Anyone Home, and every person recomputed (initialize, and after a person is saved) */
 private void initPeople() {
     Set<String> seen = [] as Set
     ids("ppl").each { String id ->
-        realDevs(settings["ppl_${id}_srcs"]).each { d -> if (seen.add("presence|${d.id}".toString())) subscribe(d, "presence", "pplSourceHandler") }
+        realDevs(settings["ppl_${id}_srcs"]).each { d ->
+            ["presence", "distanceFromHome"].each { String a -> if (seen.add("${a}|${d.id}".toString())) subscribe(d, a, "pplSourceHandler") }
+        }
         def w = pplWifiDev(id)
         if (w) ["SSID", "dataConnection", "presence"].each { String a -> if (seen.add("${a}|${w.id}".toString())) subscribe(w, a, "pplSourceHandler") }
     }
@@ -2282,58 +2356,120 @@ private void initPeople() {
     pplTimerSchedule()
 }
 
-/** a real source changed: a hand-set presence gives way, then the person is recomputed */
+/** a real source changed: its trip is recorded, a hand-set presence gives way, then the person is recomputed */
 void pplSourceHandler(evt) {
     String did = evt?.device?.id?.toString()
+    if (evt?.name == "presence" && did) {
+        Map trips = (state.pplTrips ?: [:]) as Map
+        Map tr = ((trips[did] ?: [:]) as Map) + [:]
+        long t = now()
+        if (evt.value == "present") {                       // a completed trip (10 min+) is kept until the next one
+            Long dep = tr.dep as Long, arr = tr.arr as Long
+            if (dep != null && (arr == null || dep > arr) && t - dep >= PPL_TRIP_MIN_MS) { tr.tDep = dep; tr.tArr = t; tr.tPrev = arr }
+            tr.arr = t
+        } else tr.dep = t
+        trips[did] = tr; state.pplTrips = trips
+    }
     ids("ppl").each { String id ->
         boolean uses = realDevs(settings["ppl_${id}_srcs"]).any { it.id.toString() == did } || pplWifiDev(id)?.id?.toString() == did
         if (!uses) return
-        Map ov = (state.pplOverride ?: [:]) as Map
-        if (ov.remove(id) != null) state.pplOverride = ov
+        if (evt?.name == "presence") {                      // only a real presence change ends a hand-set presence
+            Map ov = (state.pplOverride ?: [:]) as Map
+            if (ov.remove(id) != null) state.pplOverride = ov
+        }
         pplEvaluate(id)
     }
     pplTimerSchedule()
 }
 
-/** decides one person's presence: present at once; away only after every fresh source says away for the depart delay */
+/**
+ * Decides one person's presence.
+ * Arrive: home Wi-Fi, or a usable source that reported present after the person was marked away.
+ * Depart (after the depart delay, every signal holding the whole time): every usable source away, or with the
+ * "at least N" rule also N away signals (usable sources away + the Wi-Fi device on Mobile / another network).
+ * A source that turns present during the delay cancels it; home Wi-Fi always means home.
+ */
 private void pplEvaluate(String id) {
     def c = sbChild(itemDni("ppl", id))
     Map dep = (state.pplDepart ?: [:]) as Map
     if (!c) { if (dep.remove(id) != null) state.pplDepart = dep; return }          // device missing: no timer left behind
     Map st = pplStatus(id)
     if (c.currentValue("sources") != st.summary) childEvent(c, "sources", st.summary)
-    String hw = st.wifi ? "true" : "false"
+    String hw = st.homeWifi ? "true" : "false"
     if (c.currentValue("onHomeWifi") != hw) childEvent(c, "onHomeWifi", hw)
+    pplSuspectUpdate(id, c, st.suspect as List)
     if (((state.pplOverride ?: [:]) as Map)[id]) return
     String cur = c.currentValue("presence") as String
-    if (st.present) {
-        if (dep.remove(id) != null) { state.pplDepart = dep; logInfo "${itemName('ppl', id)}: leaving cancelled (${st.reason})" }
-        if (cur != "present") pplSet(id, "present", st.reason as String)
+    String n = itemName("ppl", id)
+    BigDecimal mins = (settings["ppl_${id}_departMin"] != null ? settings["ppl_${id}_departMin"] : 2) as BigDecimal
+    String minTxt = mins.stripTrailingZeros().toPlainString()
+    boolean atLeast = settings["ppl_${id}_departRule"] == "atleast"
+    int need = Math.max(1, intSet("ppl_${id}_departN", 2))
+    List votes = (st.awayVotes ?: []) as List
+
+    if (cur != "present" && cur != null) {                 // away: arrive on home Wi-Fi or a source that turned present since
+        if (dep.remove(id) != null) state.pplDepart = dep
+        Long leftAt = ((state.pplLeftAt ?: [:]) as Map)[id] as Long
+        List back = ((st.presentSrcs ?: []) as List).findAll { leftAt == null || ((it.since ?: 0L) as Long) > leftAt }
+        if (st.homeWifi || back) pplSet(id, "present", st.homeWifi ? st.reason as String : "${back*.name.join(' and ')} present${st.ign}".toString())
         else if (c.currentValue("reason") != st.reason) childEvent(c, "reason", st.reason)
         return
     }
-    if (!st.fresh) {                                     // no source reporting (Wi-Fi never votes away): keep what we have
-        if (dep.remove(id) != null) state.pplDepart = dep
+    if (cur == null) {                                      // a new device starts from the sources
+        pplSet(id, st.present ? "present" : "not present", st.reason as String)
+        if (!st.present && !(st.usable as Integer)) {       // no source yet: any source that later says present may arrive
+            Map la = (state.pplLeftAt ?: [:]) as Map; la.remove(id); state.pplLeftAt = la
+        }
+        return
+    }
+
+    // present: is this a departure?
+    boolean allRule = st.allAway as boolean
+    boolean nRule = atLeast && votes.size() >= need
+    boolean leaving = !st.homeWifi && (allRule || nRule) && (st.usable as Integer) > 0
+    Long due = dep[id] as Long
+    if (leaving && due != null) {                           // a source that turned present during the delay cancels it
+        long started = due - (long) (mins * 60000)
+        if (((st.presentSrcs ?: []) as List).any { ((it.since ?: 0L) as Long) > started }) leaving = false
+    }
+    String why = allRule ? "All sources away" :
+            "${votes.size()} of ${st.signals} signals away (${votes.join(', ')})".toString()
+    if (!leaving) {
+        if (dep.remove(id) != null) { state.pplDepart = dep; logInfo "${n}: leaving cancelled (${st.reason})" }
         if (c.currentValue("reason") != st.reason) childEvent(c, "reason", st.reason)
         return
     }
-    if (cur == null || cur == "not present") {
-        if (dep.remove(id) != null) state.pplDepart = dep
-        if (cur == null) pplSet(id, "not present", st.reason as String)               // a new device starts from the sources
-        return
-    }
-    BigDecimal mins = (settings["ppl_${id}_departMin"] != null ? settings["ppl_${id}_departMin"] : 2) as BigDecimal
-    Long due = dep[id] as Long
     if (due == null) {
         due = now() + (long) (mins * 60000)
-        if (due <= now()) { pplSet(id, "not present", "All sources away"); return }
+        if (due <= now()) { pplSet(id, "not present", "${why}${st.ign}".toString()); return }
         dep[id] = due; state.pplDepart = dep
-        childEvent(c, "reason", "All sources away, leaving in ${mins.stripTrailingZeros().toPlainString()} min unless one comes back")
-        logInfo "${itemName('ppl', id)}: all sources away, waiting ${mins.stripTrailingZeros().toPlainString()} min"
+        childEvent(c, "reason", "${why}, leaving in ${minTxt} min unless that changes${st.ign}".toString())
+        logInfo "${n}: ${why}, waiting ${minTxt} min"
     } else if (now() >= due - 500L) {
         dep.remove(id); state.pplDepart = dep
-        pplSet(id, "not present", "All sources away for ${mins.stripTrailingZeros().toPlainString()} min")
+        pplSet(id, "not present", "${why} for ${minTxt} min${st.ign}".toString())
     }
+}
+
+/** suspectSources attribute, a log line when a source becomes stuck or clears, one notice per stuck spell */
+private void pplSuspectUpdate(String id, c, List suspect) {
+    Map all = (state.pplSuspect ?: [:]) as Map
+    List before = ((all[id] ?: []) as List).collect { it.toString() }
+    List now_ = suspect.collect { it.id as String }
+    String attr = suspect ? suspect*.name.join(", ") : "none"
+    if (c.currentValue("suspectSources") != attr) childEvent(c, "suspectSources", attr)
+    if (before == now_) return
+    String n = itemName("ppl", id)
+    suspect.findAll { !before.contains(it.id as String) }.each { Map s ->
+        String since = s.since ? new Date(s.since as Long).format("MMM d", location.timeZone) : "a while"
+        String msg = "${n}'s ${s.name} presence looks stuck (no change since ${since}); it is ignored until it changes. Open its app on the phone."
+        log.warn "${APP_TITLE}: ${msg}"
+        ((settings["ppl_${id}_staleNotify"] ?: []) as List).each { d -> try { d.deviceNotification(msg) } catch (e) { log.warn "${APP_TITLE}: couldn't send to ${d.displayName}: ${e}" } }
+    }
+    before.findAll { !now_.contains(it) }.each { String sid ->
+        logInfo "${n}: ${realDevs(settings["ppl_${id}_srcs"]).find { it.id.toString() == sid }?.displayName ?: sid} no longer marked stuck (it changed, went quiet, or was removed)"
+    }
+    all[id] = now_; state.pplSuspect = all
 }
 
 /** sets the person's presence (only called on a change), logs it, updates Anyone Home */
@@ -2341,6 +2477,7 @@ private void pplSet(String id, String value, String reason) {
     def c = sbChild(itemDni("ppl", id))
     if (!c) return
     boolean home = value == "present"
+    if (!home) { Map la = (state.pplLeftAt ?: [:]) as Map; la[id] = now(); state.pplLeftAt = la }   // arrivals must be newer
     childEvent(c, "presence", value)
     childEvent(c, "reason", reason)
     childEvent(c, home ? "lastArrived" : "lastDeparted", fmtShort(now()))
@@ -2404,6 +2541,8 @@ void sbPresenceEvent(Map data) {
 
 private void pplForget(String id) {
     Map ov = (state.pplOverride ?: [:]) as Map; ov.remove(id); state.pplOverride = ov
+    Map la = (state.pplLeftAt ?: [:]) as Map; la.remove(id); state.pplLeftAt = la
+    Map su = (state.pplSuspect ?: [:]) as Map; su.remove(id); state.pplSuspect = su
     Map dep = (state.pplDepart ?: [:]) as Map; dep.remove(id); state.pplDepart = dep
     Map sent = (state.pplStaleSent ?: [:]) as Map
     sent.keySet().findAll { (it as String).startsWith("${id}|") }.toList().each { sent.remove(it) }

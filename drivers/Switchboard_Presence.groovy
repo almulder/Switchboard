@@ -17,12 +17,13 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.1 - 2026-11-01 - suspectSources attribute (sources Switchboard thinks are stuck, or "none").
  *  0.1.0 - 2026-10-29 - Initial build.
  */
 
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.1.0"
+@Field static final String DRIVER_VERSION = "0.1.1"
 
 metadata {
     definition(name: "Switchboard Presence", namespace: "almulder", author: "Albert Mulder") {
@@ -38,6 +39,7 @@ metadata {
         attribute "lastDeparted", "string"
         attribute "onHomeWifi", "string"
         attribute "sources", "string"
+        attribute "suspectSources", "string"
     }
     preferences {
         input name: "logEnable", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
