@@ -18,6 +18,8 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  1.0.7 - 2026-11-01 - People: "Sources that only report when they change" (e.g. the phone app's geofence). Those are never
+ *                       treated as quiet, so they always count and send no "hasn't reported" warning.
  *  1.0.6 - 2026-11-01 - Speakers & queue: "Speak without restore" per speaker. Words play as the hub's speech file with plain
  *                       playTrack (Switchboard sets and restores the volume), for Sonos speakers whose own speak restores
  *                       early and cuts messages off.
@@ -81,7 +83,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
-@Field static final String APP_VERSION = "1.0.6"
+@Field static final String APP_VERSION = "1.0.7"
 @Field static final String STOP_LABEL  = "Switchboard – Stop All"
 @Field static final String ANY_LABEL   = "Presence – Anyone Home - SB"
 // rules systems shown in the message log's "From": [app type pattern, code, name]. Other apps show their own type.
@@ -380,7 +382,7 @@ private String plural(int n, String one, String many = null) { "${n} ${n == 1 ? 
     sir : ["name", "devs", "maxMin", "guestPlay", "guestQuiet", "guestOther"],
     snd : ["name", "file", "url", "secs"],
     gm  : ["name", "type", "source", "switch", "modes", "endDate", "endTime", "defaultHours", "remindTime", "remindDevs", "notifyOnOff"],
-    ppl : ["name", "srcs", "wifiDev", "ssid1", "ssid2", "ssid3", "ssid4", "departMin", "staleHrs", "staleNotify"]
+    ppl : ["name", "srcs", "wifiDev", "ssid1", "ssid2", "ssid3", "ssid4", "departMin", "staleHrs", "changeOnly", "staleNotify"]
 ]
 private void removeItemSettings(String kind, String id) {
     String pre = "${kind}_${id}_".toString()
@@ -1285,8 +1287,13 @@ def personEditPage(params = null) {
         section(uiTitle(null, "Leaving and silent sources")) {
             input pre + "departMin", "decimal", title: "Away after every source says away for (minutes)", range: "0..120", defaultValue: 2, submitOnChange: true, width: 6
             input pre + "staleHrs", "number", title: "Ignore a source that hasn't reported in (hours), 0 = never" +
-                  tip("A source with no events for this long is left out of the decision, so a dead app can't keep someone home or block leaving. A phone geofence only reports when it changes: if it goes quiet while someone is home all day, it is simply left out."),
+                  tip("A source with no events for this long is left out of the decision, so a dead app can't keep someone home or block leaving. Sources picked below as 'only report when they change' are never left out."),
                   range: "0..720", defaultValue: 12, submitOnChange: true, width: 6
+            Map srcOpts = (realDevs(settings[pre + "srcs"]) + (pplWifiDev(id) ? [pplWifiDev(id)] : []))
+                    .unique { it.id }.collectEntries { [(it.id.toString()): it.displayName as String] }
+            if (srcOpts) input pre + "changeOnly", "enum", title: "Sources that only report when they change" +
+                  tip("E.g. the Hubitat phone app's geofence: it sends nothing while you stay put. These are never treated as quiet, so they always count and never warn. Leave OwnTracks out, so a dead OwnTracks is still caught."),
+                  options: srcOpts, multiple: true, required: false, submitOnChange: true, width: 6
             input pre + "staleNotify", "capability.notification", title: "Tell me when a source goes quiet (optional)", multiple: true, required: false
         }
         if (!draft) {
@@ -2217,8 +2224,8 @@ private List<String> pplSsids(String id) {
 }
 /** "# Phone - Albert's" → "Phone" */
 private String pplShort(d) { (((d?.displayName ?: "") as String).replaceAll(/^#\s*/, "").split(/\s+-\s+/)[0] ?: "source").trim() }
-private boolean pplStale(d, long staleMs) {
-    if (staleMs <= 0) return false
+private boolean pplStale(d, long staleMs, List changeOnly = []) {
+    if (staleMs <= 0 || changeOnly.contains(d.id.toString())) return false     // reports only on change: never "quiet"
     Long last = null
     try { last = d.getLastActivity()?.time as Long } catch (ignored) { }
     return last != null && now() - last > staleMs
@@ -2227,12 +2234,13 @@ private boolean pplStale(d, long staleMs) {
 /** [present, fresh (sources still reporting), wifiOk (Wi-Fi device still reporting), wifi (on home Wi-Fi), reason, summary, stale names] */
 private Map pplStatus(String id) {
     long staleMs = intSet("ppl_${id}_staleHrs", 12) * 3600000L
+    List changeOnly = ((settings["ppl_${id}_changeOnly"] ?: []) as List).collect { it.toString() }
     List parts = [], presentBy = [], stale = []
     int fresh = 0
     List srcs = realDevs(settings["ppl_${id}_srcs"])
     srcs.each { d ->
         String nm = pplShort(d)
-        if (pplStale(d, staleMs)) { stale << (d.displayName as String); parts << "${nm}: no report"; return }
+        if (pplStale(d, staleMs, changeOnly)) { stale << (d.displayName as String); parts << "${nm}: no report"; return }
         fresh++
         boolean p = d.currentValue("presence") == "present"
         if (p) presentBy << nm
@@ -2242,7 +2250,7 @@ private Map pplStatus(String id) {
     def w = pplWifiDev(id)
     String ssid = null
     if (w) {
-        wifiOk = !pplStale(w, staleMs)
+        wifiOk = !pplStale(w, staleMs, changeOnly)
         if (wifiOk) {
             ssid = (w.currentValue("SSID") ?: "") as String
             String dc = (w.currentValue("dataConnection") ?: "") as String

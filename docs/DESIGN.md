@@ -261,13 +261,15 @@ Switchboard reads the sources and never writes to them.
   sources). List page `peoplePage`, edit page `personEditPage`.
 - Inputs: `ppl_<id>_srcs` (presence sensors, Switchboard's own left out), `_wifiDev` (a device with `SSID` and
   `dataConnection`, e.g. OwnTracks), `_ssid1`…`_ssid4` (home network names; separate boxes because names can
-  contain commas), `_departMin` (default 2), `_staleHrs` (default 12, 0 = never), `_staleNotify` (notification devices).
+  contain commas), `_departMin` (default 2), `_staleHrs` (default 12, 0 = never), `_changeOnly`
+  (1.0.7: enum of source / Wi-Fi device ids that only report when they change, e.g. the phone app geofence; never
+  stale), `_staleNotify` (notification devices).
 - **Rule:** any fresh source present, or the Wi-Fi device on a home SSID (and dataConnection not "Mobile") →
   present at once, a pending departure is cancelled. Wi-Fi is only ever a positive signal. Every fresh source away
   and not on home Wi-Fi → departure after `departMin` (`state.pplDepart` id → due ms, one `pplTimer` scheduled for
-  the earliest). A source with no activity (`getLastActivity()`) for `staleHrs` is left out; nothing fresh → keep
+  the earliest). A source with no activity (`getLastActivity()`) for `staleHrs` is left out (unless it is in `_changeOnly`); nothing fresh → keep
   the current presence. Every 15 min `pplStaleCheck` recomputes everyone and pushes "X for Kelly hasn't reported in
-  12 h" once per quiet spell.
+  12 h" once per quiet spell (never for a `_changeOnly` device).
 - arrived() / departed() set it by hand (`state.pplOverride`) until a real source changes.
 - Startup (`initPeople` in initialize, also after Save): subscribe to the sources' presence and the Wi-Fi device's
   SSID / dataConnection / presence, recompute, events only on a change; pending departures survive a reboot.
@@ -301,7 +303,8 @@ dashboards, buttons and voice" (created / deleted on Done). The main page's "Rig
 known input name of that kind (an empty device picker is not in `settings.keySet()`): prof name, priority, spk,
 volMode, dayVol, nightVol, fixedVol, chime, sndVolMode, sndDayVol, sndNightVol, sndFixedVol, noResume, dedupeSec, staleSec; ntf name, devs, when, dedupeSec, prefix, pushover;
 sir name, devs, maxMin; (all three) guestPlay, guestQuiet, guestOther; snd name, file, url, secs; gm name, source, switch,
-modes, endDate, endTime, defaultHours, remindTime, remindDevs, notifyOnOff.
+modes, endDate, endTime, defaultHours, remindTime, remindDevs, notifyOnOff; ppl name, srcs, wifiDev, ssid1–ssid4,
+departMin, staleHrs, changeOnly, staleNotify.
 
 ## 4. Behaviour
 
